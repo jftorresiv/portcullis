@@ -1,0 +1,140 @@
+# =============================================================================
+# Portcullis Strict Policy
+# =============================================================================
+#
+# Use this when the user's environment is high-sensitivity (production
+# credentials present, regulated data, security research). Differences
+# from default.yaml:
+#
+#   - All trifecta combinations BLOCK (no confirm escape hatch)
+#   - All code execution BLOCKS
+#   - All fetches to untrusted domains BLOCK
+#   - Session taint propagates between sessions, not just within
+#   - Audit log is also mirrored to a write-only remote sink
+# =============================================================================
+
+version: 1
+name: "Portcullis strict policy"
+description: "For production credentials, regulated data, and red-team work"
+
+defaults:
+  mode: enforce
+  on_violation: block
+  log_level: debug
+  audit_log_path: ~/.portcullis/audit.jsonl
+  audit_db_path: ~/.portcullis/audit.db
+
+
+servers:
+  - name: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/sandbox"]
+    trust: low   # everything is low-trust in strict mode
+
+  - name: github
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN_READONLY}"
+    trust: low
+
+
+capabilities:
+  - reads_private_data
+  - sees_untrusted_content
+  - can_exfiltrate
+  - can_execute_code
+  - can_modify_files
+  - can_send_messages
+  - touches_credentials
+
+
+tools:
+  - match: "filesystem.read*"
+    tags: [reads_private_data]
+  - match: "filesystem.write*"
+    tags: [can_modify_files]
+  - match: "github.*"
+    tags: [reads_private_data, sees_untrusted_content]
+  - match: "*.execute*"
+    tags: [can_execute_code, can_modify_files, can_exfiltrate]
+
+
+tainting:
+  enabled: true
+  propagation: persistent   # taint carries across sessions for this user
+  sources:
+    - tool_returns_from: ["*"]   # ALL tool returns are taint sources in strict mode
+
+
+rules:
+
+  - name: "Block lethal trifecta — no override"
+    when:
+      session_has_capabilities:
+        any_two_of: [reads_private_data, sees_untrusted_content, can_exfiltrate]
+    action: block
+    message: "Strict mode: blocked any two legs of the trifecta. No override available."
+
+  - name: "Block all code execution"
+    when:
+      tool_call:
+        has_capability: can_execute_code
+    action: block
+
+  - name: "Block all writes when tainted"
+    when:
+      session_tainted: true
+      tool_call:
+        has_capability_any: [can_modify_files, can_send_messages, can_exfiltrate]
+    action: block
+
+  - name: "Allowlisted fetch only"
+    when:
+      tool_call:
+        tool_matches: ["fetch.*"]
+        arguments_match_none:
+          - 'https://(docs|github|stackoverflow)\.com/'
+          - 'https://api\.github\.com/'
+    action: block
+    message: "Strict mode: fetch only permitted to allowlisted domains."
+
+  - name: "Credentials in arguments — block + alert"
+    when:
+      tool_call:
+        arguments_match:
+          - 'sk-[a-zA-Z0-9]{32,}'
+          - 'AKIA[0-9A-Z]{16}'
+          - 'ghp_[a-zA-Z0-9]{36}'
+          - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
+    action: block
+    alert: true   # also dispatch to alert sink if configured
+
+
+emergency:
+  kill_switch_hotkey: "ctrl+shift+x"
+  on_kill: terminate_all_sessions_and_revoke_tokens
+  fail_mode: closed
+
+
+dashboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 7778
+  require_token: true
+
+
+# Mirror every audit event to a remote write-only sink. Useful for:
+#   - red-team engagements where the operator wants tamper-evident logs
+#   - regulated environments needing offsite audit trail
+audit_mirror:
+  enabled: false
+  endpoint: "https://your-audit-sink.example.com/ingest"
+  auth_header: "Bearer ${AUDIT_SINK_TOKEN}"
+
+
+analysis:
+  enabled: true
+  provider: anthropic
+  model: claude-opus-4-7   # use Opus in strict mode for deeper analysis
+  on_events: [block]

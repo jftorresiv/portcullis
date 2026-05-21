@@ -1,0 +1,313 @@
+# =============================================================================
+# Portcullis Default Policy
+# =============================================================================
+#
+# This file controls every security decision Portcullis makes. Rules are
+# evaluated TOP-TO-BOTTOM and the FIRST MATCH WINS. Order matters.
+#
+# Three core concepts to understand before reading:
+#
+#   1. CAPABILITIES are tags attached to tools (e.g. `reads_private_data`).
+#      You can tag tools manually, or let Portcullis auto-tag based on
+#      patterns. Capabilities flow up to the SESSION level: if any active
+#      tool in a session has `can_exfiltrate`, the session itself is tagged
+#      with that capability.
+#
+#   2. TAINT is a session-level flag meaning "this session has ingested
+#      content from an untrusted source." Once a session is tainted, any
+#      subsequent action with exfiltration potential is high-risk. Taint
+#      is sticky for the lifetime of the session by default.
+#
+#   3. The LETHAL TRIFECTA is the combination of:
+#         reads_private_data + sees_untrusted_content + can_exfiltrate
+#      When a session covers all three, structural data theft is possible
+#      through prompt injection alone. Portcullis's primary job is to
+#      detect and break this combination.
+# =============================================================================
+
+version: 1
+name: "Portcullis default policy"
+description: "Sensible defaults for individual developers using AI assistants"
+
+
+# -----------------------------------------------------------------------------
+# Global defaults
+# -----------------------------------------------------------------------------
+defaults:
+  # `enforce` actually blocks. `warn` only logs warnings. `log` is silent
+  # observability only. Useful to start in `warn` for a week, then switch
+  # to `enforce` once you trust your policy.
+  mode: enforce
+
+  # What happens when a rule's `action` is omitted: block | warn | confirm
+  on_violation: confirm
+
+  # Log verbosity: debug | info | warn | error
+  log_level: info
+
+  # Where to write the append-only JSONL audit log
+  audit_log_path: ~/.portcullis/audit.jsonl
+
+  # SQLite path for queryable history
+  audit_db_path: ~/.portcullis/audit.db
+
+
+# -----------------------------------------------------------------------------
+# Upstream MCP servers
+# -----------------------------------------------------------------------------
+# These are the real MCP servers Portcullis proxies for. Your AI client
+# only ever talks to Portcullis; Portcullis forwards calls here.
+servers:
+  - name: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Documents"]
+    trust: medium  # low | medium | high — affects default rule behavior
+
+  - name: github
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+    trust: medium
+
+  - name: fetch
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-fetch"]
+    trust: low  # fetch is high-risk because it reaches the open internet
+
+
+# -----------------------------------------------------------------------------
+# Capability definitions
+# -----------------------------------------------------------------------------
+# Add custom capabilities here. The first four are the standard trifecta +
+# code execution; the rest are optional but useful.
+capabilities:
+  - reads_private_data        # tool returns content the user considers private
+  - sees_untrusted_content    # tool returns content from sources outside user control
+  - can_exfiltrate            # tool can transmit data outside the trust boundary
+  - can_execute_code          # tool can run arbitrary code (shell, eval, RCE-adjacent)
+  - can_modify_files          # tool can write to or delete files
+  - can_send_messages         # tool sends external messages (email, chat, SMS)
+  - touches_credentials       # tool reads or writes secrets/tokens
+
+
+# -----------------------------------------------------------------------------
+# Tool capability tagging
+# -----------------------------------------------------------------------------
+# `match` is a glob against `{server_name}.{tool_name}`. First match wins.
+# These rules are how Portcullis learns what each tool does.
+tools:
+  # Email — the trifecta in a single tool family
+  - match: "gmail.read*"
+    tags: [reads_private_data, sees_untrusted_content]
+  - match: "gmail.send*"
+    tags: [can_exfiltrate, can_send_messages]
+  - match: "gmail.search*"
+    tags: [reads_private_data, sees_untrusted_content]
+
+  # Filesystem
+  - match: "filesystem.read*"
+    tags: [reads_private_data]
+  - match: "filesystem.write*"
+    tags: [can_modify_files]
+  - match: "filesystem.list*"
+    tags: [reads_private_data]
+  - match: "filesystem.search*"
+    tags: [reads_private_data]
+
+  # GitHub — issues/PRs are untrusted content sources
+  - match: "github.get_issue*"
+    tags: [reads_private_data, sees_untrusted_content]
+  - match: "github.create_*"
+    tags: [can_exfiltrate, can_modify_files]
+  - match: "github.search*"
+    tags: [reads_private_data, sees_untrusted_content]
+
+  # Network fetches — the canonical exfiltration vector
+  - match: "fetch.*"
+    tags: [sees_untrusted_content, can_exfiltrate]
+
+  # Shell / code execution
+  - match: "*.execute*"
+    tags: [can_execute_code, can_modify_files, can_exfiltrate]
+  - match: "*.shell*"
+    tags: [can_execute_code, can_modify_files, can_exfiltrate]
+  - match: "*.eval*"
+    tags: [can_execute_code]
+
+  # Things that are usually safe
+  - match: "calculator.*"
+    tags: []
+  - match: "time.*"
+    tags: []
+
+
+# -----------------------------------------------------------------------------
+# Taint sources
+# -----------------------------------------------------------------------------
+# When Portcullis sees a tool return content from one of these sources, it
+# marks the entire session as "tainted." Tainted sessions trigger stricter
+# rules for any subsequent exfiltration-capable action.
+tainting:
+  enabled: true
+  propagation: session   # session | message — how sticky taint is
+  sources:
+    - tool_returns_from: ["fetch.*", "gmail.read*", "gmail.search*"]
+    - tool_returns_from: ["github.get_issue*", "github.search*"]
+    - tool_returns_from: ["filesystem.read*"]   # files can contain injected text
+
+
+# -----------------------------------------------------------------------------
+# Rules — evaluated in order, first match wins
+# -----------------------------------------------------------------------------
+rules:
+
+  # -------------------------------------------------------------------------
+  # 1. The headline rule: lethal trifecta
+  # -------------------------------------------------------------------------
+  - name: "Lethal trifecta — block"
+    description: "Session has all three legs. Block by default."
+    when:
+      session_has_capabilities:
+        all: [reads_private_data, sees_untrusted_content, can_exfiltrate]
+    action: block
+    message: |
+      Lethal trifecta detected. This session can read private data,
+      has been exposed to untrusted content, and can exfiltrate.
+      Per OWASP Top 10 for Agentic Applications ASI01 + ASI02, this
+      combination is structurally vulnerable to prompt injection.
+      To proceed, start a new session without one of these capabilities.
+
+  # -------------------------------------------------------------------------
+  # 2. Tainted session + exfiltration capability = require confirmation
+  # -------------------------------------------------------------------------
+  - name: "Tainted exfiltration"
+    when:
+      session_tainted: true
+      tool_call:
+        has_capability: can_exfiltrate
+    action: confirm
+    message: "This session has ingested untrusted content. Confirm before exfiltrating."
+
+  # -------------------------------------------------------------------------
+  # 3. Credential-looking arguments
+  # -------------------------------------------------------------------------
+  - name: "Credential exfiltration patterns"
+    when:
+      tool_call:
+        arguments_match:
+          - 'sk-[a-zA-Z0-9]{32,}'                          # OpenAI / Anthropic style
+          - 'AKIA[0-9A-Z]{16}'                             # AWS access key
+          - 'AIza[0-9A-Za-z\-_]{35}'                       # Google API key
+          - 'ghp_[a-zA-Z0-9]{36}'                          # GitHub PAT
+          - 'xox[baprs]-[0-9a-zA-Z\-]+'                    # Slack token
+          - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'   # Private keys
+          - '(?i)(api[_-]?key|password|token|secret)\s*[:=]\s*[^\s,;}]+\S'
+    action: block
+    message: "Tool call arguments contain what looks like a credential."
+
+  # -------------------------------------------------------------------------
+  # 4. Tool description injection scanner (runs at registration time)
+  # -------------------------------------------------------------------------
+  - name: "Injection patterns in tool descriptions"
+    when:
+      tool_registration:
+        description_matches:
+          - '(?i)forget (?:everything|all|your)'
+          - '(?i)ignore (?:all )?previous (?:instructions|prompts)'
+          - '<important>.{0,500}</important>'
+          - '(?i)this code is (?:safe|legit|tested|verified)'
+          - '\u200b|\u200c|\u200d|\ufeff'                  # zero-width characters
+          - '(?i)system\s*:\s*you (?:are|should|must)'
+    action: block
+    message: "Tool description contains prompt injection patterns. Refusing to register."
+
+  # -------------------------------------------------------------------------
+  # 5. Suspicious URL patterns in fetch arguments
+  # -------------------------------------------------------------------------
+  - name: "Suspicious fetch targets"
+    when:
+      tool_call:
+        tool_matches: ["fetch.*", "http.*"]
+        arguments_match:
+          - '(?i)(?:webhook|hook|collect|telemetry|analytics|beacon)\.'
+          - 'https?://\d+\.\d+\.\d+\.\d+'                  # raw IPs
+          - 'https?://[^/]*\.(tk|ml|ga|cf|gq)/'             # cheap TLDs
+    action: confirm
+    message: "Fetch target looks unusual. Confirm intent."
+
+  # -------------------------------------------------------------------------
+  # 6. First-time server registration
+  # -------------------------------------------------------------------------
+  - name: "New MCP server confirmation"
+    when:
+      server: new
+    action: confirm
+    message: |
+      First time using this MCP server. Review its tools and capabilities
+      before allowing. Check for: bundled reverse shells, suspicious post-
+      install scripts, and tool descriptions with hidden instructions.
+
+  # -------------------------------------------------------------------------
+  # 7. Code execution always requires confirmation
+  # -------------------------------------------------------------------------
+  - name: "Code execution confirmation"
+    when:
+      tool_call:
+        has_capability: can_execute_code
+    action: confirm
+    message: "About to execute code via {tool_name}. Confirm command."
+
+  # -------------------------------------------------------------------------
+  # 8. Bulk data access pattern (potential exfiltration prep)
+  # -------------------------------------------------------------------------
+  - name: "Bulk read detection"
+    when:
+      session_metrics:
+        tool_calls_with_capability:
+          capability: reads_private_data
+          count_in_window: 20
+          window_seconds: 60
+    action: confirm
+    message: "Agent is reading private data unusually fast. Confirm continued access."
+
+
+# -----------------------------------------------------------------------------
+# Emergency controls
+# -----------------------------------------------------------------------------
+emergency:
+  # Hotkey that kills all active sessions immediately.
+  kill_switch_hotkey: "ctrl+shift+x"
+
+  # What to do on kill: terminate sessions, optionally also revoke any
+  # OAuth tokens the proxy is managing.
+  on_kill: terminate_all_sessions
+
+  # If Portcullis crashes, should the proxy fail open (let traffic through)
+  # or fail closed (block everything)? Default fail closed for safety.
+  fail_mode: closed
+
+
+# -----------------------------------------------------------------------------
+# Dashboard
+# -----------------------------------------------------------------------------
+dashboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 7778
+  # Require local auth token to access dashboard (printed on startup)
+  require_token: true
+
+
+# -----------------------------------------------------------------------------
+# LLM-powered analysis (optional)
+# -----------------------------------------------------------------------------
+# When a rule fires, Portcullis can optionally call Claude to generate a
+# plain-English explanation of why the call was flagged and what an
+# attacker might be attempting. Disabled by default — costs money.
+analysis:
+  enabled: false
+  provider: anthropic
+  model: claude-sonnet-4-6
+  # API key read from env var ANTHROPIC_API_KEY
+  on_events: [block, confirm]
