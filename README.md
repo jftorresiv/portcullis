@@ -246,4 +246,4 @@ If you find a vulnerability in Portcullis itself, please open a private security
 
 ## License
 
-MIT
+All Rights Reserved
