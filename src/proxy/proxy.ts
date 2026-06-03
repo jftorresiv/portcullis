@@ -1,15 +1,19 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { LineFramer } from "./line-framer.js";
 import type { InterceptedMessage, JsonRpcMessage } from "../types/mcp.js";
 
 export interface ProxyOptions {
   serverCommand: string[];
+  serverName: string;
   onMessage: (msg: InterceptedMessage) => void;
 }
 
 export function startProxy(options: ProxyOptions): void {
   const [cmd, ...args] = options.serverCommand;
   if (!cmd) throw new Error("serverCommand must not be empty");
+
+  const sessionId = randomUUID();
 
   const server = spawn(cmd, args, {
     stdio: ["pipe", "pipe", "inherit"],
@@ -32,6 +36,8 @@ export function startProxy(options: ProxyOptions): void {
       raw,
       parsed: msg,
       timestamp: new Date().toISOString(),
+      sessionId,
+      server: options.serverName,
     };
 
     options.onMessage(intercepted);
@@ -47,6 +53,8 @@ export function startProxy(options: ProxyOptions): void {
       raw,
       parsed: msg,
       timestamp: new Date().toISOString(),
+      sessionId,
+      server: options.serverName,
     };
 
     options.onMessage(intercepted);
