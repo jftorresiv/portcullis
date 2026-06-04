@@ -36,4 +36,6 @@ export interface InterceptedMessage {
   raw: string;
   parsed: JsonRpcMessage;
   timestamp: string;
+  sessionId: string;
+  server: string;
 }

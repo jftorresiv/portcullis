@@ -59,11 +59,13 @@ defaults:
 # only ever talks to Portcullis; Portcullis forwards calls here.
 servers:
   - name: filesystem
+    transport: stdio        # stdio | http
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Documents"]
     trust: medium  # low | medium | high — affects default rule behavior
 
   - name: github
+    transport: stdio
     command: npx
     args: ["-y", "@modelcontextprotocol/server-github"]
     env:
@@ -71,9 +73,16 @@ servers:
     trust: medium
 
   - name: fetch
+    transport: stdio
     command: npx
     args: ["-y", "@modelcontextprotocol/server-fetch"]
     trust: low  # fetch is high-risk because it reaches the open internet
+
+  # Example HTTP/SSE server — uncomment and set url to use.
+  # - name: remote-example
+  #   transport: http
+  #   url: http://localhost:3001   # base URL; proxy connects to <url>/sse and <url>/message
+  #   trust: low
 
 
 # -----------------------------------------------------------------------------
