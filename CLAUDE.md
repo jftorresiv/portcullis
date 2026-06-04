@@ -112,6 +112,23 @@ Portcullis is a security tool, so the bar for our own code is high:
 
 ---
 
+### Audit log invariants
+
+The JSONL file is the source of truth. SQLite is a queryable mirror, always
+rebuildable from JSONL via `replay-from-jsonl`. This dictates write ordering:
+
+1. JSONL write (with fsync) MUST complete before the SQLite write.
+2. SQLite write failures MUST NOT propagate out of `Logger.append()` — catch,
+   log a warning, continue. A failed mirror write is recoverable; a failed
+   audit write is not.
+3. Nothing may write to SQLite that did not first land in JSONL.
+
+Do not "fix" this with a transaction wrapper across both stores. There is no
+real transaction across a file append and a separate SQLite process; faking
+one would silently break the invariant.
+
+---
+
 ## Research foundations
 
 These shape how we think about the problem. New contributors should at least skim these before substantial work:
@@ -142,11 +159,11 @@ When in doubt about scope or approach: ask before committing.
 
 ## Team
 
-- **Jose** — project lead. Junior at Purdue, cybersecurity major. Background in agentic AI security, OWASP research, CTFs.
-- **Partners:** to be added. Each new contributor adds themselves here.
+- **Jose Torres IV** — project lead. Junior at Purdue, cybersecurity major. Background in network security, agentic AI security, systems administration, CTFs.
+- **Dallan Stepps** - sub-lead. Junior at Purdue, cybersecurity major. Background in security operations, networking, CTFs, systems administration, agentic AI security.
 
 ---
 
 ## License
 
-MIT. See LICENSE.
+All Rights Reserved. See LICENSE.
