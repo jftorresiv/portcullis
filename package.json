@@ -20,6 +20,7 @@
   },
   "type": "module",
   "dependencies": {
+    "fastify": "^5.8.5",
     "zod": "^4.4.3"
   }
 }
