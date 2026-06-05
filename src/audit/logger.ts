@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { z } from "zod";
+import type { Store } from "./store.js";
 
 export const AuditEventSchema = z.object({
   timestamp: z.string().datetime(),
@@ -20,8 +21,9 @@ export class Logger {
   private readonly ready: Promise<void>;
   // Serialises concurrent append() calls so lines never interleave.
   private writeQueue: Promise<void> = Promise.resolve();
+  private readonly store: Store | null;
 
-  constructor(logPath: string) {
+  constructor(logPath: string, store?: Store) {
     const resolved = logPath.startsWith("~")
       ? path.join(os.homedir(), logPath.slice(1))
       : logPath;
@@ -35,6 +37,8 @@ export class Logger {
       this.stream.once("open", resolve);
       this.stream.once("error", reject);
     });
+
+    this.store = store ?? null;
   }
 
   async append(event: AuditEvent): Promise<void> {
@@ -46,12 +50,12 @@ export class Logger {
 
     // Chain onto the queue; propagate errors to the caller but keep the
     // queue moving so one bad write doesn't block subsequent appends.
-    const next = this.writeQueue.then(() => this.doWrite(line));
+    const next = this.writeQueue.then(() => this.doWrite(line, event));
     this.writeQueue = next.catch(() => {});
     return next;
   }
 
-  private doWrite(line: string): Promise<void> {
+  private doWrite(line: string, event: AuditEvent): Promise<void> {
     return this.ready.then(
       () =>
         new Promise<void>((resolve, reject) => {
@@ -63,8 +67,24 @@ export class Logger {
             // fsync so a crash after write() doesn't silently lose the event.
             const fd = (this.stream as unknown as { fd: number }).fd;
             fs.fsync(fd, (syncErr) => {
-              if (syncErr) reject(syncErr);
-              else resolve();
+              if (syncErr) {
+                reject(syncErr);
+                return;
+              }
+              // JSONL write is durable — now mirror to SQLite.
+              // SQLite failures are logged as warnings and never propagated:
+              // a failed mirror is recoverable via replay-from-jsonl; a
+              // failed audit write is not.
+              if (this.store !== null) {
+                try {
+                  this.store.insert(event);
+                } catch (err) {
+                  process.stderr.write(
+                    `[portcullis] SQLite mirror write failed: ${err}\n`
+                  );
+                }
+              }
+              resolve();
             });
           });
         })
