@@ -18,7 +18,47 @@ export const dashboardHtml = `<!DOCTYPE html>
     .session-id { font-family: monospace; font-weight: 600; }
     .session-meta { color: #6e7681; font-size: 0.75rem; margin-top: 0.25rem; }
     .empty { color: #6e7681; font-size: 0.85rem; font-style: italic; }
-    .placeholder { color: #6e7681; font-size: 0.85rem; margin: 0; }
+
+    .tl-filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .tl-filters input, .tl-filters select {
+      background: #0d1117; border: 1px solid #21262d; color: #c9d1d9;
+      border-radius: 4px; padding: 0.35rem 0.6rem; font-size: 0.8rem; outline: none;
+    }
+    .tl-filters input:focus, .tl-filters select:focus { border-color: #58a6ff; }
+    .tl-filters input::placeholder { color: #6e7681; }
+    .tl-filters select option { background: #161b22; }
+    .tl-row { border: 1px solid #21262d; border-radius: 4px; margin-bottom: 0.375rem; overflow: hidden; }
+    .tl-row:last-child { margin-bottom: 0; }
+    .tl-header {
+      display: grid;
+      grid-template-columns: 5.5rem 5.25rem 1.5rem 1fr 1fr 5rem;
+      gap: 0.5rem; align-items: center;
+      padding: 0.5rem 0.75rem; cursor: pointer;
+      font-size: 0.8rem; user-select: none;
+    }
+    .tl-header:hover { background: #1c2128; }
+    .tl-row.expanded > .tl-header { background: #1c2128; border-bottom: 1px solid #21262d; }
+    .tl-time { color: #6e7681; font-family: monospace; white-space: nowrap; }
+    .tl-session { font-family: monospace; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-dir { color: #6e7681; text-align: center; }
+    .tl-server { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-method { font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-decision {
+      font-size: 0.7rem; font-family: monospace; text-align: center;
+      border: 1px solid; border-radius: 3px; padding: 0.15rem 0.4rem; white-space: nowrap;
+    }
+    .tl-detail { display: none; padding: 0.75rem; background: #0d1117; }
+    .tl-row.expanded > .tl-detail { display: block; }
+    .tl-caps { display: flex; gap: 0.375rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+    .cap-tag {
+      font-size: 0.7rem; font-family: monospace; padding: 0.15rem 0.4rem;
+      border-radius: 3px; background: #161b22; border: 1px solid #21262d; color: #8b949e;
+    }
+    .tl-payload {
+      margin: 0; font-size: 0.75rem; color: #c9d1d9; white-space: pre-wrap;
+      word-break: break-all; max-height: 20rem; overflow-y: auto;
+      background: #0d1117; line-height: 1.5;
+    }
   </style>
 </head>
 <body>
@@ -27,51 +67,210 @@ export const dashboardHtml = `<!DOCTYPE html>
 
   <section>
     <h2>Status</h2>
-    <div id="health"><span class="empty">Loading…</span></div>
+    <div id="health"><span class="empty">Loading&#8230;</span></div>
   </section>
 
   <section>
     <h2>Sessions</h2>
-    <div id="sessions"><span class="empty">Loading…</span></div>
+    <div id="sessions"><span class="empty">Loading&#8230;</span></div>
   </section>
 
   <section>
     <h2>Timeline</h2>
-    <p class="placeholder">Timeline view coming in issue #7.</p>
+    <div class="tl-filters">
+      <input id="filter-server" type="text" placeholder="Filter by server&#8230;" style="flex:1;min-width:8rem">
+      <input id="filter-method" type="text" placeholder="Filter by tool / method&#8230;" style="flex:1;min-width:10rem">
+      <select id="filter-decision">
+        <option value="">All decisions</option>
+        <option value="allowed">Allowed</option>
+        <option value="blocked">Blocked</option>
+        <option value="warned">Warned</option>
+        <option value="confirmed">Confirmed</option>
+      </select>
+    </div>
+    <div id="timeline"><span class="empty">Loading&#8230;</span></div>
   </section>
 
   <script>
+    // ---- health + sessions ----
     async function load() {
       try {
-        const h = await (await fetch('/api/health')).json();
+        var h = await (await fetch('/api/health')).json();
         document.getElementById('health').innerHTML =
           '<span class="badge"><span class="dot"></span>v' + h.version + '</span>' +
           '&nbsp;&nbsp;<span style="font-size:0.8rem;color:#6e7681">uptime ' + h.uptime_seconds + 's</span>';
-      } catch {
+      } catch (e) {
         document.getElementById('health').innerHTML = '<span class="empty">Could not reach API</span>';
       }
 
       try {
-        const sessions = await (await fetch('/api/sessions')).json();
-        const el = document.getElementById('sessions');
+        var sessions = await (await fetch('/api/sessions')).json();
+        var el = document.getElementById('sessions');
         if (!sessions.length) {
           el.innerHTML = '<span class="empty">No sessions yet. Start a proxy to see activity here.</span>';
-          return;
+        } else {
+          el.innerHTML = sessions.map(function(s) {
+            return '<div class="session">' +
+              '<span class="session-id">' + s.session_id.slice(0, 8) + '&#8230;</span>' +
+              '&nbsp;&nbsp;' + s.servers.join(', ') +
+              '<div class="session-meta">' + s.event_count + ' event' + (s.event_count !== 1 ? 's' : '') +
+              ' \xb7 last active ' + new Date(s.last_seen).toLocaleString() + '</div>' +
+              '</div>';
+          }).join('');
         }
-        el.innerHTML = sessions.map(function(s) {
-          return '<div class="session">' +
-            '<span class="session-id">' + s.session_id.slice(0, 8) + '…</span>' +
-            '&nbsp;&nbsp;' + s.servers.join(', ') +
-            '<div class="session-meta">' + s.event_count + ' event' + (s.event_count !== 1 ? 's' : '') +
-            ' \xb7 last active ' + new Date(s.last_seen).toLocaleString() + '</div>' +
-            '</div>';
-        }).join('');
-      } catch {
+      } catch (e) {
         document.getElementById('sessions').innerHTML = '<span class="empty">Failed to load sessions</span>';
       }
     }
 
     load();
+    setInterval(load, 10000);
+
+    // ---- timeline ----
+    var tlState = {
+      events: [],
+      expanded: {},
+      lastHash: '',
+      filters: { server: '', method: '', decision: '' }
+    };
+
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function evtKey(e) {
+      return e.timestamp + '|' + e.session_id + '|' + e.direction + '|' + e.method;
+    }
+
+    function decisionStyle(d) {
+      var c = d === 'allowed'   ? '#3fb950'
+            : d === 'blocked'   ? '#f85149'
+            : d === 'warned'    ? '#d29922'
+            : d === 'confirmed' ? '#58a6ff'
+            : '#6e7681';
+      return 'color:' + c + ';border-color:' + c + '40';
+    }
+
+    function fmtTime(ts) {
+      return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function applyFilters(events) {
+      var f = tlState.filters;
+      return events.filter(function(e) {
+        if (f.server   && e.server.toLowerCase().indexOf(f.server.toLowerCase())   === -1) return false;
+        if (f.method   && e.method.toLowerCase().indexOf(f.method.toLowerCase())   === -1) return false;
+        if (f.decision && e.decision !== f.decision) return false;
+        return true;
+      });
+    }
+
+    function renderTimeline() {
+      var container = document.getElementById('timeline');
+      var filtered = applyFilters(tlState.events);
+
+      if (filtered.length === 0) {
+        container.innerHTML = tlState.events.length === 0
+          ? '<span class="empty">No events yet. Make a tool call through Portcullis to see it here.</span>'
+          : '<span class="empty">No events match the current filters.</span>';
+        return;
+      }
+
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < filtered.length; i++) {
+        var e = filtered[i];
+        var key = evtKey(e);
+        var isExpanded = !!tlState.expanded[key];
+
+        var row = document.createElement('div');
+        row.className = 'tl-row' + (isExpanded ? ' expanded' : '');
+        row.dataset.key = key;
+
+        var dir = e.direction === 'client_to_server' ? '&rarr;' : '&larr;';
+        var dLabel = e.decision || 'pass';
+
+        var header = document.createElement('div');
+        header.className = 'tl-header';
+        header.innerHTML =
+          '<span class="tl-time">'    + fmtTime(e.timestamp) + '</span>' +
+          '<span class="tl-session" title="' + escHtml(e.session_id) + '">' + e.session_id.slice(0, 8) + '&#8230;</span>' +
+          '<span class="tl-dir">'     + dir + '</span>' +
+          '<span class="tl-server" title="' + escHtml(e.server) + '">'  + escHtml(e.server)  + '</span>' +
+          '<span class="tl-method" title="' + escHtml(e.method) + '">'  + escHtml(e.method)  + '</span>' +
+          '<span class="tl-decision" style="' + decisionStyle(e.decision) + '">' + escHtml(dLabel) + '</span>';
+
+        var detail = document.createElement('div');
+        detail.className = 'tl-detail';
+
+        var capHtml = '';
+        if (e.capabilities && e.capabilities.length) {
+          capHtml = '<div class="tl-caps">' + e.capabilities.map(function(c) {
+            return '<span class="cap-tag">' + escHtml(c) + '</span>';
+          }).join('') + '</div>';
+        }
+        detail.innerHTML = capHtml + '<pre class="tl-payload">' + escHtml(JSON.stringify(e.message, null, 2)) + '</pre>';
+
+        row.appendChild(header);
+        row.appendChild(detail);
+        frag.appendChild(row);
+      }
+
+      container.innerHTML = '';
+      container.appendChild(frag);
+    }
+
+    // Toggle expand/collapse via event delegation — survives re-renders
+    document.getElementById('timeline').addEventListener('click', function(evt) {
+      var row = evt.target.closest('.tl-row');
+      if (!row) return;
+      var key = row.dataset.key;
+      if (tlState.expanded[key]) {
+        delete tlState.expanded[key];
+        row.classList.remove('expanded');
+      } else {
+        tlState.expanded[key] = true;
+        row.classList.add('expanded');
+      }
+    });
+
+    document.getElementById('filter-server').addEventListener('input', function() {
+      tlState.filters.server = this.value;
+      renderTimeline();
+    });
+    document.getElementById('filter-method').addEventListener('input', function() {
+      tlState.filters.method = this.value;
+      renderTimeline();
+    });
+    document.getElementById('filter-decision').addEventListener('change', function() {
+      tlState.filters.decision = this.value;
+      renderTimeline();
+    });
+
+    async function fetchTimeline() {
+      try {
+        var events = await (await fetch('/api/events')).json();
+        // Newest first
+        events.sort(function(a, b) {
+          return a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0;
+        });
+        var hash = events.length + '|' + (events[0] ? events[0].timestamp : '');
+        if (hash === tlState.lastHash) return;
+        tlState.lastHash = hash;
+        tlState.events = events;
+        renderTimeline();
+      } catch (e) {
+        if (!tlState.events.length) {
+          document.getElementById('timeline').innerHTML = '<span class="empty">Could not load events.</span>';
+        }
+      }
+    }
+
+    fetchTimeline();
+    setInterval(fetchTimeline, 2000);
   </script>
 </body>
 </html>`;
