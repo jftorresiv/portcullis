@@ -217,7 +217,7 @@ rules:
   # The rules below require `when` conditions the v0.2 engine does not yet
   # support. Re-enable each once its supporting condition lands.
 
-  # TODO(#taint-tracker): needs session taint state (`session_tainted`).
+  # TODO(#28): needs session taint state (`session_tainted`).
   # - name: "Tainted exfiltration"
   #   when:
   #     session_tainted: true
@@ -226,7 +226,7 @@ rules:
   #   action: confirm
   #   message: "This session has ingested untrusted content. Confirm before exfiltrating."
 
-  # TODO(#arg-scanner): needs argument-regex matching (`arguments_match`).
+  # TODO(#28): needs argument-regex matching (`arguments_match`).
   # - name: "Credential exfiltration patterns"
   #   when:
   #     arguments_match:
@@ -240,7 +240,7 @@ rules:
   #   action: block
   #   message: "Tool call arguments contain what looks like a credential."
 
-  # TODO(#injection-scanner): needs tool-registration description scanning.
+  # TODO(#28): needs tool-registration description scanning.
   # - name: "Injection patterns in tool descriptions"
   #   when:
   #     description_matches:
@@ -253,7 +253,7 @@ rules:
   #   action: block
   #   message: "Tool description contains prompt injection patterns. Refusing to register."
 
-  # TODO(#arg-scanner): needs argument-regex matching (`arguments_match`).
+  # TODO(#28): needs argument-regex matching (`arguments_match`).
   # - name: "Suspicious fetch targets"
   #   when:
   #     tool: "fetch.*"
@@ -264,7 +264,7 @@ rules:
   #   action: confirm
   #   message: "Fetch target looks unusual. Confirm intent."
 
-  # TODO(#server-registry): needs first-seen server detection (`server: new`
+  # TODO(#28): needs first-seen server detection (`server: new`
   # as a state, not a glob).
   # - name: "New MCP server confirmation"
   #   when:
@@ -275,7 +275,7 @@ rules:
   #     before allowing. Check for: bundled reverse shells, suspicious post-
   #     install scripts, and tool descriptions with hidden instructions.
 
-  # TODO(#session-metrics): needs windowed session rate metrics.
+  # TODO(#28): needs windowed session rate metrics.
   # - name: "Bulk read detection"
   #   when:
   #     session_metrics:
