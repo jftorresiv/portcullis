@@ -82,7 +82,18 @@ calls land in v0.3 for LLM-powered analysis, behind a config flag.
 - **Session** — a contiguous conversation between one MCP client and Portcullis. Has its own ID, capability set, and taint state.
 - **Taint** — a session-level flag indicating that untrusted content has entered the session. Once tainted, subsequent exfiltration actions are high-risk. Borrowed from taint analysis in PL security.
 - **Lethal trifecta** — the conjunction of \`reads_private_data\`, \`sees_untrusted_content\`, and \`can_exfiltrate\` in one session. Primary structural risk.
-- **Policy** — YAML file declaring rules. Rules are \`when\` conditions plus an \`action\` (\`allow\` / \`block\` / \`warn\` / \`confirm\`). First match wins.
+- **Policy** — A YAML file declaring an ordered list of rules. Each rule has a `when` condition and an `action` (`allow` / `block` / `warn` / `confirm`). First match wins. Lives in `policies/`; the default ships as `policies/default.yaml`.
+- **Policy engine purity** - The `PolicyEngine` is a pure functional core. `evaluate()` is synchronous, performs no I/O, writes no logs, and has no side effects beyond returning a `PolicyDecision`. The decision carries the matched rule by reference so the caller has everything needed to log the outcome. Logging the policy decision is the caller's responsibility. In practice that caller is the proxy intercept loop (`src/proxy/proxy.ts`), which writes the matched rule name and action into the audit log entry for the tool call it is gating. The engine never imports the logger.
+Why:
+1. Testability — a pure evaluator is unit-testable without filesystem or
+   logger mocks.
+2. Single-source audit ordering — JSONL-first ordering only works if
+   exactly one component owns the write. Letting the engine also log
+   would create two writers racing on the same event.
+3. Synchronous contract — the intercept loop cannot await a slow policy
+   check. Banning side effects keeps `evaluate()` trivially fast.
+
+Schema strictness: the engine validates the full rule list at load time and rejects any `when` condition key it cannot evaluate. Silently ignoring an unknown condition is a security failure — a rule that looks like it blocks something but does nothing is worse than no rule at all. Adding a new condition type requires both an engine change and a schema-validator change in the same commit.
 
 ---
 
