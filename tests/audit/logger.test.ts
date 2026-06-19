@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Logger, AuditEventSchema } from "../../src/audit/logger.js";
 import type { AuditEvent } from "../../src/audit/logger.js";
+import { Store } from "../../src/audit/store.js";
 
 function tmpLog(): string {
   return path.join(os.tmpdir(), `portcullis-test-${randomUUID()}.jsonl`);
@@ -169,5 +170,107 @@ describe("Logger", () => {
     assert.ok(fs.existsSync(path.dirname(resolved)));
     await tilde.close();
     fs.rmSync(path.dirname(resolved), { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Logger + Store integration
+// ---------------------------------------------------------------------------
+
+describe("Logger + Store", () => {
+  it("happy path: append writes to both JSONL and SQLite", async () => {
+    const logPath = path.join(
+      os.tmpdir(),
+      `portcullis-store-test-${randomUUID()}.jsonl`
+    );
+    const store = new Store(":memory:");
+    const logger = new Logger(logPath, store);
+
+    const event: AuditEvent = {
+      timestamp: new Date().toISOString(),
+      session_id: randomUUID(),
+      direction: "client_to_server",
+      server: "test-server",
+      method: "tools/call",
+      message: { jsonrpc: "2.0", id: 1, method: "tools/call" },
+      decision: "allowed",
+    };
+
+    await logger.append(event);
+    await logger.close();
+
+    // JSONL side
+    const lines = fs.readFileSync(logPath, "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+    const parsed = JSON.parse(lines[0] ?? "{}") as unknown;
+    assert.doesNotThrow(() => AuditEventSchema.parse(parsed));
+
+    // SQLite side
+    const rows = store.query();
+    assert.equal(rows.length, 1);
+    const row = rows[0];
+    assert.ok(row !== undefined);
+    assert.equal(row.session_id, event.session_id);
+    assert.equal(row.method, event.method);
+    assert.equal(row.decision, "allowed");
+
+    store.close();
+    fs.rmSync(logPath, { force: true });
+  });
+
+  it("failure path: SQLite insert throws → JSONL still written, no exception escapes, warning logged", async () => {
+    const logPath = path.join(
+      os.tmpdir(),
+      `portcullis-store-fail-${randomUUID()}.jsonl`
+    );
+
+    // Minimal mock Store whose insert always throws.
+    const mockStore = {
+      insert(_event: AuditEvent): void {
+        throw new Error("simulated SQLite failure");
+      },
+    } as unknown as Store;
+
+    const logger = new Logger(logPath, mockStore);
+
+    const warns: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (chunk: string) => boolean }).write =
+      (chunk: string) => {
+        warns.push(chunk);
+        return true;
+      };
+
+    try {
+      // Must not throw.
+      await assert.doesNotReject(() =>
+        logger.append({
+          timestamp: new Date().toISOString(),
+          session_id: randomUUID(),
+          direction: "server_to_client",
+          server: "test-server",
+          method: "tools/list",
+          message: {},
+        })
+      );
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    await logger.close();
+
+    // JSONL must contain the event despite the SQLite failure.
+    assert.ok(
+      fs.existsSync(logPath) && fs.statSync(logPath).size > 0,
+      "JSONL file must be non-empty"
+    );
+
+    // A warning must have been emitted to stderr.
+    assert.ok(
+      warns.some((w) => w.includes("SQLite mirror write failed")),
+      "expected SQLite failure warning on stderr"
+    );
+
+    fs.rmSync(logPath, { force: true });
   });
 });

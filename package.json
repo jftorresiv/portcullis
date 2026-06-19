@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "A local security proxy for AI agents. Sits between your AI client (Claude Desktop, Cursor, Windsurf, etc.) and the MCP servers it talks to. Logs every tool call, enforces policy, and breaks the *lethal trifecta* before it can hurt you.",
   "main": "index.js",
+  "bin": {
+    "portcullis": "dist/cli.js"
+  },
   "directories": {
     "doc": "docs",
     "test": "tests"
@@ -15,6 +18,7 @@
   "author": "",
   "license": "Copyright (c) 2026 Jose Torres IV and Dallan Stepps. All Rights Reserved.",
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.1",
     "typescript": "^6.0.3"
   },
@@ -22,6 +26,7 @@
   "dependencies": {
     "fastify": "^5.8.5",
     "yaml": "^2.9.0",
+    "better-sqlite3": "^12.10.0",
     "zod": "^4.4.3"
   }
 }
