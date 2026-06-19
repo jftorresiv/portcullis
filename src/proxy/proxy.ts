@@ -3,10 +3,15 @@ import { randomUUID } from "node:crypto";
 import { LineFramer } from "./line-framer.js";
 import type { InterceptedMessage, JsonRpcMessage } from "../types/mcp.js";
 
+export interface ForwardDecision {
+  forward: boolean;
+  syntheticResponse?: string;
+}
+
 export interface ProxyOptions {
   serverCommand: string[];
   serverName: string;
-  onMessage: (msg: InterceptedMessage) => void;
+  onMessage: (msg: InterceptedMessage) => Promise<ForwardDecision>;
 }
 
 export function startProxy(options: ProxyOptions): void {
@@ -28,20 +33,33 @@ export function startProxy(options: ProxyOptions): void {
   serverFramer.attach(server.stdout);
 
   clientFramer.on("line", (raw: string) => {
-    const msg = parseMessage(raw);
-    if (!msg) return;
+    void (async () => {
+      const msg = parseMessage(raw);
+      if (!msg) return;
 
-    const intercepted: InterceptedMessage = {
-      direction: "client->server",
-      raw,
-      parsed: msg,
-      timestamp: new Date().toISOString(),
-      sessionId,
-      server: options.serverName,
-    };
+      const intercepted: InterceptedMessage = {
+        direction: "client->server",
+        raw,
+        parsed: msg,
+        timestamp: new Date().toISOString(),
+        sessionId,
+        server: options.serverName,
+      };
 
-    options.onMessage(intercepted);
-    server.stdin?.write(raw + "\n");
+      let decision: ForwardDecision;
+      try {
+        decision = await options.onMessage(intercepted);
+      } catch (err) {
+        process.stderr.write(`[portcullis] enforcement error: ${err}\n`);
+        decision = { forward: false };
+      }
+
+      if (decision.forward) {
+        server.stdin?.write(raw + "\n");
+      } else if (decision.syntheticResponse !== undefined) {
+        process.stdout.write(decision.syntheticResponse + "\n");
+      }
+    })();
   });
 
   serverFramer.on("line", (raw: string) => {
@@ -57,7 +75,8 @@ export function startProxy(options: ProxyOptions): void {
       server: options.serverName,
     };
 
-    options.onMessage(intercepted);
+    // Server→client messages are never blocked; call onMessage for logging only.
+    void options.onMessage(intercepted);
     process.stdout.write(raw + "\n");
   });
 
