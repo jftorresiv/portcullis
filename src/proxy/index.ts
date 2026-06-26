@@ -7,11 +7,11 @@ import type { ForwardDecision } from "./proxy.js";
 import { Logger } from "../audit/logger.js";
 import { loadPolicy } from "../policy/parser.js";
 import { PolicyEngine } from "../policy/engine.js";
-import type { PolicyDecision, ToolCallContext } from "../policy/engine.js";
+import type { PolicyDecision } from "../policy/engine.js";
 import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
-import type { InterceptedMessage } from "../types/mcp.js";
+import type { InterceptedMessage, ToolCallEvent } from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
 const SERVER_NAME = "filesystem";
@@ -28,9 +28,12 @@ const policyPath =
 let engine: PolicyEngine | null = null;
 
 try {
+  // loadPolicy still owns the `tools` block for the tagger; the engine owns
+  // only the `rules` block and validates it itself via load().
   const policy = loadPolicy(policyPath);
   initTagger(new CapabilityRegistry(policy.tools));
-  engine = new PolicyEngine(policy);
+  engine = new PolicyEngine();
+  engine.load(policyPath);
 } catch (err) {
   process.stderr.write(`[portcullis] Failed to load policy: ${err}\n`);
   process.stderr.write("[portcullis] Running in log-only mode (no enforcement)\n");
@@ -63,7 +66,7 @@ function buildSyntheticError(
     "id" in msg.parsed
       ? (msg.parsed.id as string | number)
       : 0;
-  const ruleLabel = decision.matchedRule ?? "policy";
+  const ruleLabel = decision.matchedRule?.name ?? "policy";
   const errorMsg = `Blocked by Portcullis policy: ${ruleLabel}`;
   return JSON.stringify({
     jsonrpc: "2.0",
@@ -73,8 +76,8 @@ function buildSyntheticError(
 }
 
 async function promptConfirm(decision: PolicyDecision): Promise<boolean> {
-  const rule = decision.matchedRule ?? "unknown rule";
-  const detail = decision.message?.trim() ?? "";
+  const rule = decision.matchedRule?.name ?? "unknown rule";
+  const detail = decision.matchedRule?.message?.trim() ?? "";
   process.stderr.write(
     `\n[portcullis] CONFIRM REQUIRED\nRule: "${rule}"\n${detail ? detail + "\n" : ""}Allow? [y/N]: `
   );
@@ -162,17 +165,14 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     return { forward: true };
   }
 
-  const ctx: ToolCallContext = {
-    toolName: call.toolName,
-    serverName: msg.server,
-    toolCapabilities: toolCapabilities ?? [],
-    sessionCapabilities: [...tracker.getCapabilities()],
-    sessionTainted: false, // populated by #21
-    trifecta: tracker.isTriggered(),
-    arguments: call.args,
+  const event: ToolCallEvent = {
+    tool: call.toolName,
+    server: msg.server,
+    capabilities: toolCapabilities ?? [],
+    sessionTrifecta: tracker.isTriggered(),
   };
 
-  const decision = engine.evaluate(ctx);
+  const decision = engine.evaluate(event);
 
   if (decision.action === "allow") {
     return { forward: true };
@@ -180,7 +180,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
 
   if (decision.action === "warn") {
     process.stderr.write(
-      `[portcullis] WARN — rule "${decision.matchedRule ?? "unknown"}": ${decision.message?.trim() ?? ""}\n`
+      `[portcullis] WARN — rule "${decision.matchedRule?.name ?? "unknown"}": ${decision.matchedRule?.message?.trim() ?? ""}\n`
     );
     logger.append({
       timestamp: msg.timestamp,
@@ -218,7 +218,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
 
   // action === "block"
   process.stderr.write(
-    `[portcullis] BLOCKED — rule "${decision.matchedRule ?? "unknown"}": ${decision.message?.trim() ?? ""}\n`
+    `[portcullis] BLOCKED — rule "${decision.matchedRule?.name ?? "unknown"}": ${decision.matchedRule?.message?.trim() ?? ""}\n`
   );
   logger.append({
     timestamp: msg.timestamp,
