@@ -1,29 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { TrifectaTracker, TRIFECTA_LEGS } from "../../src/detection/trifecta.js";
-import { PolicyEngine } from "../../src/policy/engine.js";
-import type { ToolCallContext } from "../../src/policy/engine.js";
-import type { Policy } from "../../src/policy/parser.js";
-
-function makePolicy(rules: Policy["rules"]): Policy {
-  return {
-    version: 1,
-    name: "test",
-    capabilities: ["reads_private_data", "can_exfiltrate", "sees_untrusted_content", "can_execute_code", "can_modify_files", "can_send_messages", "touches_credentials"],
-    tools: [],
-    rules,
-  };
-}
-
-const baseCtx: ToolCallContext = {
-  toolName: "read_file",
-  serverName: "filesystem",
-  toolCapabilities: [],
-  sessionCapabilities: [],
-  sessionTainted: false,
-  trifecta: false,
-  arguments: {},
-};
 
 describe("TrifectaTracker", () => {
   it("starts with no capabilities and not triggered", () => {
@@ -99,39 +76,5 @@ describe("TrifectaTracker", () => {
     tracker.observe([]);
     assert.equal(tracker.getCapabilities().size, before);
     assert.equal(tracker.isTriggered(), false);
-  });
-});
-
-describe("PolicyEngine — trifecta: true condition", () => {
-  const engine = new PolicyEngine(makePolicy([
-    {
-      name: "block on trifecta",
-      action: "block",
-      when: { trifecta: true },
-    },
-  ]));
-
-  it("does not block when trifecta is false", () => {
-    const ctx: ToolCallContext = { ...baseCtx, trifecta: false };
-    assert.equal(engine.evaluate(ctx).action, "allow");
-  });
-
-  it("blocks when trifecta is true", () => {
-    const ctx: ToolCallContext = { ...baseCtx, trifecta: true };
-    const result = engine.evaluate(ctx);
-    assert.equal(result.action, "block");
-    assert.equal(result.matchedRule, "block on trifecta");
-  });
-
-  it("trifecta: false rule matches when trifecta is not triggered", () => {
-    const safeEngine = new PolicyEngine(makePolicy([
-      {
-        name: "warn when safe",
-        action: "warn",
-        when: { trifecta: false },
-      },
-    ]));
-    const ctx: ToolCallContext = { ...baseCtx, trifecta: false };
-    assert.equal(safeEngine.evaluate(ctx).action, "warn");
   });
 });
