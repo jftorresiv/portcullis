@@ -11,6 +11,7 @@ import type { PolicyDecision } from "../policy/engine.js";
 import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
+import { TaintTracker } from "../detection/taint.js";
 import type { InterceptedMessage, ToolCallEvent } from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
@@ -40,6 +41,7 @@ try {
 }
 
 const tracker = new TrifectaTracker();
+const taintTracker = new TaintTracker();
 
 function extractMethod(msg: InterceptedMessage): string {
   return "method" in msg.parsed ? (msg.parsed.method as string) : "(response)";
@@ -146,6 +148,36 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
         process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
       });
     }
+
+    // Observe taint. Capture the pre-observe state so the session_tainted
+    // audit event fires exactly once, on the false→true transition.
+    const taintEvent: ToolCallEvent = {
+      tool: call.toolName,
+      server: msg.server,
+      capabilities: toolCapabilities ?? [],
+    };
+    const wasTainted = taintTracker.isTainted();
+    taintTracker.observe(taintEvent);
+    if (!wasTainted && taintTracker.isTainted()) {
+      process.stderr.write(
+        `[portcullis] [ALERT] Session ${msg.sessionId} tainted by ${call.toolName}\n`
+      );
+      logger.append({
+        timestamp: new Date().toISOString(),
+        session_id: msg.sessionId,
+        direction: "client_to_server",
+        server: msg.server,
+        method: "tools/call",
+        message: {
+          alert: "session_tainted",
+          triggeredBy: call.toolName,
+        },
+        type: "session_tainted",
+        ...(toolCapabilities !== undefined ? { capabilities: toolCapabilities } : {}),
+      }).catch((err: unknown) => {
+        process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
+      });
+    }
   }
 
   logger.append({
@@ -170,6 +202,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     server: msg.server,
     capabilities: toolCapabilities ?? [],
     sessionTrifecta: tracker.isTriggered(),
+    sessionTainted: taintTracker.isTainted(),
   };
 
   const decision = engine.evaluate(event);
