@@ -40,6 +40,9 @@ const WhenSchema = z
     capabilities: CapabilityConditionSchema.optional(),
     session_trifecta: z.boolean().optional(),
     session_tainted: z.boolean().optional(),
+    // Fires if the call's descriptionFindings (injection-scanner pattern keys)
+    // include any listed string. Exact match against pattern keys, not a glob.
+    description_matches: z.array(z.string().min(1)).min(1).optional(),
   })
   .strict();
 
@@ -166,6 +169,13 @@ function matches(when: Rule["when"], event: ToolCallEvent): boolean {
     when.session_tainted !== (event.sessionTainted ?? false)
   ) {
     return false;
+  }
+
+  if (when.description_matches !== undefined) {
+    const findings = event.descriptionFindings ?? [];
+    if (!when.description_matches.some((key) => findings.includes(key))) {
+      return false;
+    }
   }
 
   return true;

@@ -12,7 +12,9 @@ import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
 import { TaintTracker } from "../detection/taint.js";
-import type { InterceptedMessage, ToolCallEvent } from "../types/mcp.js";
+import { InjectionScanner } from "../scanner/injection.js";
+import type { ScanResult } from "../scanner/injection.js";
+import type { InterceptedMessage, Tool, ToolCallEvent } from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
 const SERVER_NAME = "filesystem";
@@ -42,6 +44,28 @@ try {
 
 const tracker = new TrifectaTracker();
 const taintTracker = new TaintTracker();
+
+// Injection scanner + its result cache. The cache is keyed by tool name and is
+// fully replaced on each tools/list response so a re-advertised tool can never
+// retain stale findings. Looked up at tool-call time to enrich the policy event.
+const scanner = new InjectionScanner();
+const scanCache = new Map<string, ScanResult[]>();
+
+// Extracts the tools array from a server→client tools/list response. Responses
+// carry no `method`, so detection is structural: parsed.result.tools is an
+// array. Returns null for anything else.
+function extractToolsList(msg: InterceptedMessage): Tool[] | null {
+  if (msg.direction !== "server->client") return null;
+  const parsed = msg.parsed as unknown as Record<string, unknown>;
+  const result = parsed["result"];
+  if (result === null || typeof result !== "object") return null;
+  const tools = (result as Record<string, unknown>)["tools"];
+  if (!Array.isArray(tools)) return null;
+  return tools.filter(
+    (t): t is Tool =>
+      t !== null && typeof t === "object" && typeof (t as Tool).name === "string"
+  );
+}
 
 function extractMethod(msg: InterceptedMessage): string {
   return "method" in msg.parsed ? (msg.parsed.method as string) : "(response)";
@@ -117,6 +141,43 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
   process.stderr.write(
     `[portcullis] ${msg.timestamp} ${msg.direction} ${JSON.stringify(msg.parsed).slice(0, 120)}\n`
   );
+
+  // Scan tools/list advertisements server→client. Repopulate the cache and emit
+  // an alert (JSONL-first, then stderr) for every warn/critical finding.
+  const toolsList = extractToolsList(msg);
+  if (toolsList !== null) {
+    const findings = scanner.scan(toolsList);
+    scanCache.clear();
+    for (const f of findings) {
+      const existing = scanCache.get(f.toolName);
+      if (existing) existing.push(f);
+      else scanCache.set(f.toolName, [f]);
+    }
+
+    for (const f of findings) {
+      if (f.severity !== "warn" && f.severity !== "critical") continue;
+      logger.append({
+        timestamp: new Date().toISOString(),
+        session_id: msg.sessionId,
+        direction: "server_to_client",
+        server: msg.server,
+        method: "tools/list",
+        message: {
+          alert: "injection_scan_alert",
+          toolName: f.toolName,
+          field: f.field,
+          pattern: f.pattern,
+          severity: f.severity,
+        },
+        type: "injection_scan_alert",
+      }).catch((err: unknown) => {
+        process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
+      });
+      process.stderr.write(
+        `[portcullis] [INJECTION ${f.severity.toUpperCase()}] tool "${f.toolName}" ${f.field}: ${f.pattern}\n`
+      );
+    }
+  }
 
   const call = msg.direction === "client->server" ? extractToolCall(msg) : null;
   const toolCapabilities =
@@ -197,12 +258,24 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     return { forward: true };
   }
 
+  // Enrich with cached injection findings for this tool. Only warn+critical
+  // pattern keys reach the policy engine; 'info' findings are excluded.
+  const cached = scanCache.get(call.toolName) ?? [];
+  const descriptionFindings = [
+    ...new Set(
+      cached
+        .filter((f) => f.severity === "warn" || f.severity === "critical")
+        .map((f) => f.pattern)
+    ),
+  ];
+
   const event: ToolCallEvent = {
     tool: call.toolName,
     server: msg.server,
     capabilities: toolCapabilities ?? [],
     sessionTrifecta: tracker.isTriggered(),
     sessionTainted: taintTracker.isTainted(),
+    ...(descriptionFindings.length > 0 ? { descriptionFindings } : {}),
   };
 
   const decision = engine.evaluate(event);
