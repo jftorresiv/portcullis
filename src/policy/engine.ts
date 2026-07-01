@@ -39,6 +39,7 @@ const WhenSchema = z
     server: z.string().min(1).optional(),
     capabilities: CapabilityConditionSchema.optional(),
     session_trifecta: z.boolean().optional(),
+    session_tainted: z.boolean().optional(),
   })
   .strict();
 
@@ -156,6 +157,13 @@ function matches(when: Rule["when"], event: ToolCallEvent): boolean {
   if (
     when.session_trifecta !== undefined &&
     when.session_trifecta !== (event.sessionTrifecta ?? false)
+  ) {
+    return false;
+  }
+
+  if (
+    when.session_tainted !== undefined &&
+    when.session_tainted !== (event.sessionTainted ?? false)
   ) {
     return false;
   }

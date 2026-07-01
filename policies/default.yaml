@@ -177,6 +177,8 @@ tainting:
 #   server:            glob string matched against the originating server name
 #   capabilities:      { all?: [..], any?: [..] } matched against the call's tags
 #   session_trifecta:  boolean matched against the session trifecta-complete flag
+#   session_tainted:   boolean matched against the session taint flag (set once
+#                      the session has ingested untrusted content)
 #
 # Rules relying on conditions the engine cannot yet evaluate (taint state,
 # argument regexes, tool-registration scanning, "new server" detection, session
@@ -202,7 +204,24 @@ rules:
       To proceed, start a new session without one of these capabilities.
 
   # -------------------------------------------------------------------------
-  # 2. Code execution always requires confirmation
+  # 2. Tainted session attempting exfiltration
+  # -------------------------------------------------------------------------
+  - name: "Taint + exfiltration risk"
+    description: >
+      Session has ingested untrusted content and is now attempting an action
+      that can transmit data outward. Warn so the user can review.
+    when:
+      session_tainted: true
+      capabilities:
+        any: [can_exfiltrate]
+    action: warn
+    message: |
+      This session has ingested untrusted content and is now attempting to
+      exfiltrate. Prompt injection in that content could be driving this
+      call. Review the destination and payload before allowing.
+
+  # -------------------------------------------------------------------------
+  # 3. Code execution always requires confirmation
   # -------------------------------------------------------------------------
   - name: "Code execution confirmation"
     when:
@@ -216,15 +235,6 @@ rules:
   # -------------------------------------------------------------------------
   # The rules below require `when` conditions the v0.2 engine does not yet
   # support. Re-enable each once its supporting condition lands.
-
-  # TODO(#28): needs session taint state (`session_tainted`).
-  # - name: "Tainted exfiltration"
-  #   when:
-  #     session_tainted: true
-  #     capabilities:
-  #       any: [can_exfiltrate]
-  #   action: confirm
-  #   message: "This session has ingested untrusted content. Confirm before exfiltrating."
 
   # TODO(#28): needs argument-regex matching (`arguments_match`).
   # - name: "Credential exfiltration patterns"

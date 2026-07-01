@@ -54,4 +54,9 @@ export interface ToolCallEvent {
   // so the pure engine never has to reach for session state. Defaults to false
   // until the trifecta tracker (a later issue) populates it.
   sessionTrifecta?: boolean;
+  // Whether the session is tainted — untrusted content has entered it. Rides
+  // on the event for the same reason as sessionTrifecta: the pure engine never
+  // reaches for session state. Populated by the taint tracker; defaults to
+  // false in evaluation.
+  sessionTainted?: boolean;
 }
