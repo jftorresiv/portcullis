@@ -203,8 +203,28 @@ rules:
       combination is structurally vulnerable to prompt injection.
       To proceed, start a new session without one of these capabilities.
 
+  # 2. Tool description injection scanner (issue #22) — block
   # -------------------------------------------------------------------------
-  # 2. Tainted session attempting exfiltration
+  # `description_matches` fires when the injection scanner flagged the called
+  # tool's advertised name/description/inputSchema with any of the listed
+  # pattern keys. Critical patterns block; nested-instruction syntax warns.
+  - name: "Critical injection pattern detected"
+    when:
+      description_matches: ['jailbreak_phrase', 'hidden_unicode']
+    action: block
+    message: "Tool description contains a known prompt injection pattern."
+
+  # -------------------------------------------------------------------------
+  # 3. Suspicious tool description — warn
+  # -------------------------------------------------------------------------
+  - name: "Suspicious instruction pattern in tool description"
+    when:
+      description_matches: ['nested_instruction']
+    action: warn
+    message: "Tool description contains nested instruction syntax."
+
+  # -------------------------------------------------------------------------
+  # 4. Tainted session attempting exfiltration — warn
   # -------------------------------------------------------------------------
   - name: "Taint + exfiltration risk"
     description: >
@@ -221,7 +241,7 @@ rules:
       call. Review the destination and payload before allowing.
 
   # -------------------------------------------------------------------------
-  # 3. Code execution always requires confirmation
+  # 5. Code execution always requires confirmation
   # -------------------------------------------------------------------------
   - name: "Code execution confirmation"
     when:

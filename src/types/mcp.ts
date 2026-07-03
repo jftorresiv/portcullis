@@ -40,6 +40,14 @@ export interface InterceptedMessage {
   server: string;
 }
 
+// A tool as advertised in an MCP `tools/list` response. Only the fields the
+// injection scanner (issue #22) reads are typed here; servers may send more.
+export interface Tool {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
 // A single tool invocation, enriched with the capability tags resolved by the
 // v0.1 capability tagger, presented to the policy engine for evaluation.
 // This is the engine's input contract (see src/policy/engine.ts).
@@ -59,4 +67,8 @@ export interface ToolCallEvent {
   // reaches for session state. Populated by the taint tracker; defaults to
   // false in evaluation.
   sessionTainted?: boolean;
+  // Pattern keys (warn+critical only) from the injection scanner's cached scan
+  // of the tools/list response, for the tool being called. Populated by the
+  // proxy at tool-call time (issue #22). Absent when no findings apply.
+  descriptionFindings?: string[];
 }
