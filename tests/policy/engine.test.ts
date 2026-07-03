@@ -198,3 +198,187 @@ describe("PolicyEngine.evaluate", () => {
     assert.equal(engine.evaluate(event()).action, "block");
   });
 });
+
+describe("PolicyEngine arguments_match", () => {
+  // A rule that blocks whenever the serialized arguments contain "sk-<hex>".
+  const secretRule =
+    `rules:\n` +
+    `  - name: block-secret\n` +
+    `    when:\n` +
+    `      arguments_match:\n` +
+    `        - 'sk-[a-zA-Z0-9]{16,}'\n` +
+    `    action: block\n`;
+
+  it("fires when a pattern matches the serialized arguments", () => {
+    const engine = engineFrom(secretRule);
+    const decision = engine.evaluate(
+      event({ arguments: { note: "token is sk-abcdef0123456789abcdef" } })
+    );
+    assert.equal(decision.action, "block");
+    assert.equal(decision.matchedRule?.name, "block-secret");
+  });
+
+  it("does not fire when no pattern matches", () => {
+    const engine = engineFrom(secretRule);
+    const decision = engine.evaluate(
+      event({ arguments: { note: "nothing sensitive here" } })
+    );
+    assert.equal(decision.action, "allow");
+    assert.equal(decision.matchedRule, undefined);
+  });
+
+  it("treats absent arguments as {} (no match)", () => {
+    const engine = engineFrom(secretRule);
+    // event() sets no `arguments`; the engine serializes it as {}.
+    assert.equal(engine.evaluate(event()).action, "allow");
+  });
+
+  it("is case-insensitive (compiled with the `i` flag)", () => {
+    const engine = engineFrom(
+      `rules:\n` +
+        `  - name: block-secret-word\n` +
+        `    when:\n` +
+        `      arguments_match:\n` +
+        `        - 'password'\n` +
+        `    action: block\n`
+    );
+    assert.equal(
+      engine.evaluate(event({ arguments: { field: "PASSWORD=hunter2" } })).action,
+      "block"
+    );
+  });
+
+  it("fails loud at load on an invalid regex, not at evaluate", () => {
+    // `(?i)` inline-flag groups are invalid in a JS RegExp; this must throw at
+    // load() so a broken pattern can never silently pass at evaluate().
+    assert.throws(
+      () =>
+        engineFrom(
+          `rules:\n  - name: bad\n    when:\n      arguments_match:\n        - '(?i)oops'\n    action: block\n`
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /Invalid arguments_match pattern/);
+        assert.match(err.message, /rule "bad"/);
+        return true;
+      }
+    );
+  });
+
+  it("truncates the subject to 5000 chars BEFORE matching", () => {
+    // The needle sits past char 5000 in the serialized arguments, so truncation
+    // must cut it off and the rule must NOT fire. A control with the needle
+    // early confirms the pattern itself works.
+    const engine = engineFrom(
+      `rules:\n` +
+        `  - name: block-needle\n` +
+        `    when:\n` +
+        `      arguments_match:\n` +
+        `        - 'NEEDLE'\n` +
+        `    action: block\n`
+    );
+
+    const buried = engine.evaluate(
+      event({ arguments: { pad: "x".repeat(6000), tail: "NEEDLE" } })
+    );
+    assert.equal(buried.action, "allow", "needle past char 5000 must be truncated away");
+
+    const early = engine.evaluate(event({ arguments: { tail: "NEEDLE" } }));
+    assert.equal(early.action, "block", "control: needle within 5000 chars must match");
+  });
+
+  it("does not hang on a catastrophic-backtracking pattern (truncation caps input)", () => {
+    // `(a+)+$` is exponential when it must fail. The full 100k-char subject ends
+    // in "!" (forcing failure) and WITHOUT truncation would backtrack forever.
+    // Truncation to 5000 chars cuts the trailing "!", leaving a run of 'a' that
+    // matches immediately — so evaluate() returns near-instantly. If truncation
+    // were removed, this test would hang, which is exactly what it guards.
+    const engine = engineFrom(
+      `rules:\n` +
+        `  - name: catastrophic\n` +
+        `    when:\n` +
+        `      arguments_match:\n` +
+        `        - '(a+)+$'\n` +
+        `    action: block\n`
+    );
+
+    const subject = "a".repeat(100000) + "!";
+    assert.ok(subject.length > 5000);
+
+    const start = Date.now();
+    const decision = engine.evaluate(event({ arguments: { blob: subject } }));
+    const elapsed = Date.now() - start;
+
+    // Truncated subject ends mid-run of 'a', so `(a+)+$` matches -> block.
+    assert.equal(decision.action, "block");
+    // Generous bound: a real hang is effectively unbounded; this cleanly clears.
+    assert.ok(elapsed < 2000, `evaluate took ${elapsed}ms — truncation likely broken`);
+  });
+});
+
+describe("default.yaml arguments_match rules", () => {
+  function defaultEngine(): PolicyEngine {
+    const engine = new PolicyEngine();
+    engine.load(DEFAULT_POLICY);
+    return engine;
+  }
+
+  describe("Credential exfiltration patterns", () => {
+    it("blocks arguments containing a credential-shaped string (positive)", () => {
+      const engine = defaultEngine();
+      const decision = engine.evaluate(
+        event({
+          server: "filesystem",
+          tool: "write_file",
+          arguments: {
+            path: "/tmp/out.txt",
+            content: "aws key AKIAIOSFODNN7EXAMPLE for the deploy",
+          },
+        })
+      );
+      assert.equal(decision.action, "block");
+      assert.match(decision.matchedRule?.name ?? "", /Credential exfiltration/);
+    });
+
+    it("allows benign arguments with no credential (negative)", () => {
+      const engine = defaultEngine();
+      const decision = engine.evaluate(
+        event({
+          server: "filesystem",
+          tool: "write_file",
+          arguments: { path: "/tmp/notes.txt", content: "grocery list: milk, eggs" },
+        })
+      );
+      assert.equal(decision.action, "allow");
+      assert.equal(decision.matchedRule, undefined);
+    });
+  });
+
+  describe("Suspicious fetch targets", () => {
+    it("confirms a fetch to a suspicious target (positive)", () => {
+      const engine = defaultEngine();
+      const decision = engine.evaluate(
+        event({
+          server: "fetch",
+          tool: "fetch",
+          arguments: { url: "http://1.2.3.4/collect" },
+        })
+      );
+      assert.equal(decision.action, "confirm");
+      assert.match(decision.matchedRule?.name ?? "", /Suspicious fetch/);
+    });
+
+    it("allows a fetch to an ordinary target (negative)", () => {
+      const engine = defaultEngine();
+      const decision = engine.evaluate(
+        event({
+          server: "fetch",
+          tool: "fetch",
+          arguments: { url: "https://example.com/docs/getting-started" },
+        })
+      );
+      assert.equal(decision.action, "allow");
+      assert.equal(decision.matchedRule, undefined);
+    });
+  });
+});

@@ -71,4 +71,10 @@ export interface ToolCallEvent {
   // of the tools/list response, for the tool being called. Populated by the
   // proxy at tool-call time (issue #22). Absent when no findings apply.
   descriptionFindings?: string[];
+  // The raw arguments object of the tool call (MCP `params.arguments`), passed
+  // through untyped from the wire. Consumed by the engine's `arguments_match`
+  // condition, which JSON-serializes it and tests configured regexes against
+  // the result. Optional: absent when the call carried no arguments, in which
+  // case the engine treats it as `{}`.
+  arguments?: unknown;
 }

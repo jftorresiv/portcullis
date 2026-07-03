@@ -179,10 +179,14 @@ tainting:
 #   session_trifecta:  boolean matched against the session trifecta-complete flag
 #   session_tainted:   boolean matched against the session taint flag (set once
 #                      the session has ingested untrusted content)
+#   arguments_match:   list of regexes tested against the JSON-serialized call
+#                      arguments; fires if ANY pattern matches. The serialized
+#                      arguments are truncated to 5000 chars before matching as
+#                      a ReDoS guardrail.
 #
-# Rules relying on conditions the engine cannot yet evaluate (taint state,
-# argument regexes, tool-registration scanning, "new server" detection, session
-# rate metrics) are commented out below with a TODO referencing the issue that
+# Rules relying on conditions the engine cannot yet evaluate (tool-registration
+# scanning, "new server" detection, session rate metrics) are commented out
+# below with a TODO referencing the issue that
 # will land the supporting condition. They are intentionally NOT silently
 # dropped: a disabled rule you can see beats a rule that looks active but does
 # nothing.
@@ -256,19 +260,20 @@ rules:
   # The rules below require `when` conditions the v0.2 engine does not yet
   # support. Re-enable each once its supporting condition lands.
 
-  # TODO(#28): needs argument-regex matching (`arguments_match`).
-  # - name: "Credential exfiltration patterns"
-  #   when:
-  #     arguments_match:
-  #       - 'sk-[a-zA-Z0-9]{32,}'                          # OpenAI / Anthropic style
-  #       - 'AKIA[0-9A-Z]{16}'                             # AWS access key
-  #       - 'AIza[0-9A-Za-z\-_]{35}'                       # Google API key
-  #       - 'ghp_[a-zA-Z0-9]{36}'                          # GitHub PAT
-  #       - 'xox[baprs]-[0-9a-zA-Z\-]+'                    # Slack token
-  #       - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'   # Private keys
-  #       - '(?i)(api[_-]?key|password|token|secret)\s*[:=]\s*[^\s,;}]+\S'
-  #   action: block
-  #   message: "Tool call arguments contain what looks like a credential."
+  - name: "Credential exfiltration patterns"
+    when:
+      arguments_match:
+        - 'sk-[a-zA-Z0-9]{32,}'                          # OpenAI / Anthropic style
+        - 'AKIA[0-9A-Z]{16}'                             # AWS access key
+        - 'AIza[0-9A-Za-z\-_]{35}'                       # Google API key
+        - 'ghp_[a-zA-Z0-9]{36}'                          # GitHub PAT
+        - 'xox[baprs]-[0-9a-zA-Z\-]+'                    # Slack token
+        - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'   # Private keys
+        # Matching is case-insensitive (engine compiles with the `i` flag), so
+        # no inline (?i) flag — JS RegExp rejects that group syntax.
+        - '(api[_-]?key|password|token|secret)\s*[:=]\s*[^\s,;}]+\S'
+    action: block
+    message: "Tool call arguments contain what looks like a credential."
 
   # TODO(#28): needs tool-registration description scanning.
   # - name: "Injection patterns in tool descriptions"
@@ -283,16 +288,19 @@ rules:
   #   action: block
   #   message: "Tool description contains prompt injection patterns. Refusing to register."
 
-  # TODO(#28): needs argument-regex matching (`arguments_match`).
-  # - name: "Suspicious fetch targets"
-  #   when:
-  #     tool: "fetch.*"
-  #     arguments_match:
-  #       - '(?i)(?:webhook|hook|collect|telemetry|analytics|beacon)\.'
-  #       - 'https?://\d+\.\d+\.\d+\.\d+'                  # raw IPs
-  #       - 'https?://[^/]*\.(tk|ml|ga|cf|gq)/'             # cheap TLDs
-  #   action: confirm
-  #   message: "Fetch target looks unusual. Confirm intent."
+  - name: "Suspicious fetch targets"
+    when:
+      # Targets the whole `fetch` server. The original stub's `tool: "fetch.*"`
+      # was the {server}.{tool} tagging-glob convention; the engine's `tool`
+      # condition matches the tool name alone, so `server` is the right key.
+      server: "fetch"
+      arguments_match:
+        # Case-insensitive via the engine's `i` flag; no inline (?i) group.
+        - '(?:webhook|hook|collect|telemetry|analytics|beacon)\.'
+        - 'https?://\d+\.\d+\.\d+\.\d+'                  # raw IPs
+        - 'https?://[^/]*\.(tk|ml|ga|cf|gq)/'             # cheap TLDs
+    action: confirm
+    message: "Fetch target looks unusual. Confirm intent."
 
   # TODO(#28): needs first-seen server detection (`server: new`
   # as a state, not a glob).
