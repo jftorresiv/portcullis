@@ -43,6 +43,13 @@ const WhenSchema = z
     // Fires if the call's descriptionFindings (injection-scanner pattern keys)
     // include any listed string. Exact match against pattern keys, not a glob.
     description_matches: z.array(z.string().min(1)).min(1).optional(),
+    // A list of regexes tested against the JSON-serialized call arguments. The
+    // condition fires if ANY pattern matches. An empty list is rejected for the
+    // same reason as an empty capability list: a condition that can never match
+    // is the silent no-op the strict load exists to prevent. Patterns are
+    // compiled at load() (see PolicyEngine.load) so an invalid regex fails loud
+    // at startup, never deferred to evaluate().
+    arguments_match: z.array(z.string().min(1)).min(1).optional(),
   })
   .strict();
 
@@ -84,6 +91,10 @@ export interface PolicyDecision {
 // in CLAUDE.md for the binding rationale.
 export class PolicyEngine {
   private rules: readonly Rule[] = [];
+  // Compiled `arguments_match` regexes, keyed by the rule they belong to. Built
+  // once in load() so evaluate() reuses them and stays fast and pure. Rules
+  // without an arguments_match condition are absent from the map.
+  private argRegexes = new Map<Rule, readonly RegExp[]>();
   private loaded = false;
 
   // Reads, parses, and fully validates the policy file. Throws a clear,
@@ -111,6 +122,32 @@ export class PolicyEngine {
     }
 
     this.rules = result.data.rules;
+
+    // Compile every `arguments_match` pattern now, not at evaluate() time. An
+    // invalid regex is a policy authoring error and must fail loud at load,
+    // matching how an unknown condition key or action is rejected above — never
+    // deferred to a request that would then throw mid-intercept. Compiling with
+    // the `i` flag makes the credential/target patterns case-insensitive as
+    // their authors intend; `u` keeps unicode escapes well-formed.
+    const compiled = new Map<Rule, readonly RegExp[]>();
+    for (const rule of this.rules) {
+      const patterns = rule.when?.arguments_match;
+      if (patterns === undefined) continue;
+      const regexes: RegExp[] = [];
+      for (const pattern of patterns) {
+        try {
+          regexes.push(new RegExp(pattern, "iu"));
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `Invalid arguments_match pattern in rule "${rule.name}" in ${filePath}: ${pattern} — ${detail}`
+          );
+        }
+      }
+      compiled.set(rule, regexes);
+    }
+
+    this.argRegexes = compiled;
     this.loaded = true;
   }
 
@@ -124,7 +161,7 @@ export class PolicyEngine {
     }
 
     for (const rule of this.rules) {
-      if (matches(rule.when, event)) {
+      if (matches(rule.when, event, this.argRegexes.get(rule))) {
         return { action: rule.action, matchedRule: rule };
       }
     }
@@ -137,9 +174,22 @@ export class PolicyEngine {
 // Matching (pure)
 // -----------------------------------------------------------------------------
 
+// ReDoS guardrail: the serialized arguments are truncated to this many chars
+// BEFORE any regex runs against them. A malicious server could return a huge
+// arguments blob crafted to trigger catastrophic backtracking; capping the
+// input length bounds the work any single pattern can do. This is the agreed
+// mitigation — deliberately no timeout and no external dependency.
+const MAX_ARG_MATCH_LENGTH = 5000;
+
 // An absent or empty `when` matches every call. Each present condition must
-// hold (logical AND); the first failing condition short-circuits.
-function matches(when: Rule["when"], event: ToolCallEvent): boolean {
+// hold (logical AND); the first failing condition short-circuits. `argRegexes`
+// are the pre-compiled patterns for this rule's `arguments_match` condition (if
+// any), supplied by evaluate() from the load-time cache.
+function matches(
+  when: Rule["when"],
+  event: ToolCallEvent,
+  argRegexes?: readonly RegExp[]
+): boolean {
   if (!when) return true;
 
   if (when.tool !== undefined && !globToRegex(when.tool).test(event.tool)) {
@@ -176,6 +226,18 @@ function matches(when: Rule["when"], event: ToolCallEvent): boolean {
     if (!when.description_matches.some((key) => findings.includes(key))) {
       return false;
     }
+  }
+
+  if (when.arguments_match !== undefined) {
+    const serialized = JSON.stringify(event.arguments ?? {});
+    // Truncate BEFORE testing (see MAX_ARG_MATCH_LENGTH). `.test()` is stateless
+    // here because the cached regexes carry no `g` flag, so reuse is safe.
+    const subject =
+      serialized.length > MAX_ARG_MATCH_LENGTH
+        ? serialized.slice(0, MAX_ARG_MATCH_LENGTH)
+        : serialized;
+    const regexes = argRegexes ?? [];
+    if (!regexes.some((re) => re.test(subject))) return false;
   }
 
   return true;

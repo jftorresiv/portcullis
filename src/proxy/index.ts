@@ -276,6 +276,9 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     sessionTrifecta: tracker.isTriggered(),
     sessionTainted: taintTracker.isTainted(),
     ...(descriptionFindings.length > 0 ? { descriptionFindings } : {}),
+    // Pass the call arguments through so the engine's `arguments_match`
+    // condition can scan them. extractToolCall already defaults this to {}.
+    arguments: call.args,
   };
 
   const decision = engine.evaluate(event);
