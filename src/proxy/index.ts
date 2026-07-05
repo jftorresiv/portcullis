@@ -11,6 +11,7 @@ import type { PolicyDecision, ToolCallContext } from "../policy/engine.js";
 import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
+import { killSwitch } from "./kill-switch.js";
 import type { InterceptedMessage } from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
@@ -69,6 +70,18 @@ function buildSyntheticError(
     jsonrpc: "2.0",
     id,
     error: { code: -32000, message: errorMsg },
+  });
+}
+
+function buildKillSwitchError(msg: InterceptedMessage): string {
+  const id =
+    "id" in msg.parsed
+      ? (msg.parsed.id as string | number)
+      : 0;
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    error: { code: -32000, message: "Session frozen by kill switch" },
   });
 }
 
@@ -157,6 +170,11 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
   });
 
+  if (msg.direction === "client->server" && killSwitch.isFrozen()) {
+    process.stderr.write("[portcullis] BLOCKED — session frozen by kill switch\n");
+    return { forward: false, syntheticResponse: buildKillSwitchError(msg) };
+  }
+
   // Only enforce on client→server tools/call messages.
   if (call === null || engine === null) {
     return { forward: true };
@@ -242,6 +260,19 @@ startProxy({
   ],
   serverName: SERVER_NAME,
   onMessage,
+  onSessionStart: (sessionId) => {
+    killSwitch.configure(logger, { sessionId, server: SERVER_NAME });
+  },
+});
+
+// The proxy must stay alive and responsive on freeze/reset — only SIGINT/SIGTERM exit.
+process.on("SIGUSR1", () => {
+  killSwitch.activate();
+  process.stderr.write("[portcullis] Kill switch ACTIVATED — all forwarding frozen\n");
+});
+process.on("SIGUSR2", () => {
+  killSwitch.reset();
+  process.stderr.write("[portcullis] Kill switch RESET — forwarding resumed\n");
 });
 
 process.on("SIGTERM", () => { void logger.close(); });

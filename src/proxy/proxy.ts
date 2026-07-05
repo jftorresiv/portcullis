@@ -12,6 +12,7 @@ export interface ProxyOptions {
   serverCommand: string[];
   serverName: string;
   onMessage: (msg: InterceptedMessage) => Promise<ForwardDecision>;
+  onSessionStart?: (sessionId: string) => void;
 }
 
 export function startProxy(options: ProxyOptions): void {
@@ -19,6 +20,7 @@ export function startProxy(options: ProxyOptions): void {
   if (!cmd) throw new Error("serverCommand must not be empty");
 
   const sessionId = randomUUID();
+  options.onSessionStart?.(sessionId);
 
   const server = spawn(cmd, args, {
     stdio: ["pipe", "pipe", "inherit"],
