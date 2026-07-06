@@ -48,6 +48,17 @@ export interface Tool {
   inputSchema?: unknown;
 }
 
+// One prior tool call in a session, as tracked by the proxy for windowed
+// session-rate metrics (issue #28). Carries only what the engine's
+// `session_metrics` condition needs: when the call happened and what
+// capabilities it exercised.
+export interface SessionCallRecord {
+  // Wall-clock time of the call, in epoch milliseconds (Date.now()).
+  timestamp: number;
+  // Call-level capability tags for that call, e.g. ["reads_private_data"].
+  capabilities: string[];
+}
+
 // A single tool invocation, enriched with the capability tags resolved by the
 // v0.1 capability tagger, presented to the policy engine for evaluation.
 // This is the engine's input contract (see src/policy/engine.ts).
@@ -77,4 +88,10 @@ export interface ToolCallEvent {
   // the result. Optional: absent when the call carried no arguments, in which
   // case the engine treats it as `{}`.
   arguments?: unknown;
+  // A slice of the session's recent tool-call history, supplied by the proxy so
+  // the engine's `session_metrics` condition can count calls within a time
+  // window without reaching for session state. The current call is NOT included
+  // (the proxy appends it only after evaluation). Absent or empty means the
+  // metric condition cannot fire.
+  sessionCallHistory?: SessionCallRecord[];
 }

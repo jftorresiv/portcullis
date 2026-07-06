@@ -50,6 +50,19 @@ const WhenSchema = z
     // compiled at load() (see PolicyEngine.load) so an invalid regex fails loud
     // at startup, never deferred to evaluate().
     arguments_match: z.array(z.string().min(1)).min(1).optional(),
+    // Windowed session-rate metric (issue #28). Fires when the session has made
+    // at least `count_in_window` calls carrying `capability` within the last
+    // `window_seconds`. Evaluated against the `sessionCallHistory` the proxy
+    // supplies on the event; absent/empty history means it cannot fire.
+    session_metrics: z
+      .object({
+        tool_calls_with_capability: z.object({
+          capability: CapabilitySchema,
+          count_in_window: z.number().int().min(1),
+          window_seconds: z.number().int().min(1),
+        }),
+      })
+      .optional(),
   })
   .strict();
 
@@ -238,6 +251,20 @@ function matches(
         : serialized;
     const regexes = argRegexes ?? [];
     if (!regexes.some((re) => re.test(subject))) return false;
+  }
+
+  if (when.session_metrics !== undefined) {
+    const { capability, count_in_window, window_seconds } =
+      when.session_metrics.tool_calls_with_capability;
+    const history = event.sessionCallHistory ?? [];
+    // Anchor the window to the current wall-clock time. This is the one clock
+    // read in evaluate(); it stays free of any other side effect. A record on
+    // the exact cutoff boundary is counted (>=).
+    const cutoff = Date.now() - window_seconds * 1000;
+    const count = history.filter(
+      (rec) => rec.timestamp >= cutoff && rec.capabilities.includes(capability)
+    ).length;
+    if (count < count_in_window) return false;
   }
 
   return true;

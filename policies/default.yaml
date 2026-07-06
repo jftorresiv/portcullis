@@ -183,13 +183,16 @@ tainting:
 #                      arguments; fires if ANY pattern matches. The serialized
 #                      arguments are truncated to 5000 chars before matching as
 #                      a ReDoS guardrail.
+#   session_metrics:   windowed session rate metric. `tool_calls_with_capability`
+#                      fires when the session has made at least `count_in_window`
+#                      calls carrying `capability` within the last
+#                      `window_seconds`.
 #
 # Rules relying on conditions the engine cannot yet evaluate (tool-registration
-# scanning, "new server" detection, session rate metrics) are commented out
-# below with a TODO referencing the issue that
-# will land the supporting condition. They are intentionally NOT silently
-# dropped: a disabled rule you can see beats a rule that looks active but does
-# nothing.
+# scanning, "new server" detection) are commented out below with a TODO
+# referencing the issue that will land the supporting condition. They are
+# intentionally NOT silently dropped: a disabled rule you can see beats a rule
+# that looks active but does nothing.
 rules:
 
   # -------------------------------------------------------------------------
@@ -313,16 +316,15 @@ rules:
   #     before allowing. Check for: bundled reverse shells, suspicious post-
   #     install scripts, and tool descriptions with hidden instructions.
 
-  # TODO(#28): needs windowed session rate metrics.
-  # - name: "Bulk read detection"
-  #   when:
-  #     session_metrics:
-  #       tool_calls_with_capability:
-  #         capability: reads_private_data
-  #         count_in_window: 20
-  #         window_seconds: 60
-  #   action: confirm
-  #   message: "Agent is reading private data unusually fast. Confirm continued access."
+  - name: "Bulk read detection"
+    when:
+      session_metrics:
+        tool_calls_with_capability:
+          capability: reads_private_data
+          count_in_window: 20
+          window_seconds: 60
+    action: confirm
+    message: "Agent is reading private data unusually fast. Confirm continued access."
 
 
 # -----------------------------------------------------------------------------
