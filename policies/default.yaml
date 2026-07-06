@@ -179,6 +179,8 @@ tainting:
 #   session_trifecta:  boolean matched against the session trifecta-complete flag
 #   session_tainted:   boolean matched against the session taint flag (set once
 #                      the session has ingested untrusted content)
+#   server_is_new:     boolean matched against the first-seen server flag (true
+#                      the first time a server is ever encountered)
 #   arguments_match:   list of regexes tested against the JSON-serialized call
 #                      arguments; fires if ANY pattern matches. The serialized
 #                      arguments are truncated to 5000 chars before matching as
@@ -302,16 +304,14 @@ rules:
     action: confirm
     message: "Fetch target looks unusual. Confirm intent."
 
-  # TODO(#28): needs first-seen server detection (`server: new`
-  # as a state, not a glob).
-  # - name: "New MCP server confirmation"
-  #   when:
-  #     server_is_new: true
-  #   action: confirm
-  #   message: |
-  #     First time using this MCP server. Review its tools and capabilities
-  #     before allowing. Check for: bundled reverse shells, suspicious post-
-  #     install scripts, and tool descriptions with hidden instructions.
+  - name: "New MCP server confirmation"
+    when:
+      server_is_new: true
+    action: confirm
+    message: |
+      First time using this MCP server. Review its tools and capabilities
+      before allowing. Check for: bundled reverse shells, suspicious post-
+      install scripts, and tool descriptions with hidden instructions.
 
   # TODO(#28): needs windowed session rate metrics.
   # - name: "Bulk read detection"

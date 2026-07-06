@@ -12,6 +12,7 @@ import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
 import { TaintTracker } from "../detection/taint.js";
+import { ServerRegistry } from "../detection/server-registry.js";
 import { InjectionScanner } from "../scanner/injection.js";
 import type { ScanResult } from "../scanner/injection.js";
 import type { InterceptedMessage, Tool, ToolCallEvent } from "../types/mcp.js";
@@ -44,6 +45,15 @@ try {
 
 const tracker = new TrifectaTracker();
 const taintTracker = new TaintTracker();
+
+// Persistent registry of servers seen on previous runs (issue #28). A server is
+// "new" only the first time it is ever encountered; the on-disk file carries
+// that fact across processes. `sessionNewServers` remembers which servers were
+// new at tools/list time this run so the tool-call event can reflect it even
+// after the server has already been marked seen.
+const serverRegistry = new ServerRegistry();
+serverRegistry.load("~/.portcullis/known-servers.json");
+const sessionNewServers = new Set<string>();
 
 // Injection scanner + its result cache. The cache is keyed by tool name and is
 // fully replaced on each tools/list response so a re-advertised tool can never
@@ -146,6 +156,32 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
   // an alert (JSONL-first, then stderr) for every warn/critical finding.
   const toolsList = extractToolsList(msg);
   if (toolsList !== null) {
+    // First sighting of this server? Record it (JSONL-first, then stderr) and
+    // remember it as new for this session so tool-call events can carry the
+    // flag even after markSeen has run.
+    if (serverRegistry.isNew(msg.server)) {
+      serverRegistry.markSeen(msg.server);
+      serverRegistry.save();
+      sessionNewServers.add(msg.server);
+      logger.append({
+        timestamp: new Date().toISOString(),
+        session_id: msg.sessionId,
+        direction: "server_to_client",
+        server: msg.server,
+        method: "tools/list",
+        message: {
+          alert: "new_server_seen",
+          server: msg.server,
+        },
+        type: "new_server_seen",
+      }).catch((err: unknown) => {
+        process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
+      });
+      process.stderr.write(
+        `[portcullis] [NEW SERVER] first time seeing server "${msg.server}"\n`
+      );
+    }
+
     const findings = scanner.scan(toolsList);
     scanCache.clear();
     for (const f of findings) {
@@ -279,6 +315,10 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     // Pass the call arguments through so the engine's `arguments_match`
     // condition can scan them. extractToolCall already defaults this to {}.
     arguments: call.args,
+    // True if this server was seen for the first time at tools/list time this
+    // session (issue #28). By tool-call time it is already marked seen, so the
+    // per-session set is the source of truth, not registry.isNew().
+    serverIsNew: sessionNewServers.has(msg.server),
   };
 
   const decision = engine.evaluate(event);

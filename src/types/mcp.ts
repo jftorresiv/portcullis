@@ -77,4 +77,8 @@ export interface ToolCallEvent {
   // the result. Optional: absent when the call carried no arguments, in which
   // case the engine treats it as `{}`.
   arguments?: unknown;
+  // Whether this is the first time the originating server has been seen. Set by
+  // the proxy from the ServerRegistry: reflects whether the server was new at
+  // tools/list time this session (issue #28). Defaults to false in evaluation.
+  serverIsNew?: boolean;
 }
