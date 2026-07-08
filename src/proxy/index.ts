@@ -7,12 +7,16 @@ import type { ForwardDecision } from "./proxy.js";
 import { Logger } from "../audit/logger.js";
 import { loadPolicy } from "../policy/parser.js";
 import { PolicyEngine } from "../policy/engine.js";
-import type { PolicyDecision, ToolCallContext } from "../policy/engine.js";
+import type { PolicyDecision } from "../policy/engine.js";
 import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
 import { killSwitch } from "./kill-switch.js";
 import type { InterceptedMessage } from "../types/mcp.js";
+import { TaintTracker } from "../detection/taint.js";
+import { InjectionScanner } from "../scanner/injection.js";
+import type { ScanResult } from "../scanner/injection.js";
+import type { InterceptedMessage, Tool, ToolCallEvent } from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
 const SERVER_NAME = "filesystem";
@@ -29,15 +33,41 @@ const policyPath =
 let engine: PolicyEngine | null = null;
 
 try {
+  // loadPolicy still owns the `tools` block for the tagger; the engine owns
+  // only the `rules` block and validates it itself via load().
   const policy = loadPolicy(policyPath);
   initTagger(new CapabilityRegistry(policy.tools));
-  engine = new PolicyEngine(policy);
+  engine = new PolicyEngine();
+  engine.load(policyPath);
 } catch (err) {
   process.stderr.write(`[portcullis] Failed to load policy: ${err}\n`);
   process.stderr.write("[portcullis] Running in log-only mode (no enforcement)\n");
 }
 
 const tracker = new TrifectaTracker();
+const taintTracker = new TaintTracker();
+
+// Injection scanner + its result cache. The cache is keyed by tool name and is
+// fully replaced on each tools/list response so a re-advertised tool can never
+// retain stale findings. Looked up at tool-call time to enrich the policy event.
+const scanner = new InjectionScanner();
+const scanCache = new Map<string, ScanResult[]>();
+
+// Extracts the tools array from a server→client tools/list response. Responses
+// carry no `method`, so detection is structural: parsed.result.tools is an
+// array. Returns null for anything else.
+function extractToolsList(msg: InterceptedMessage): Tool[] | null {
+  if (msg.direction !== "server->client") return null;
+  const parsed = msg.parsed as unknown as Record<string, unknown>;
+  const result = parsed["result"];
+  if (result === null || typeof result !== "object") return null;
+  const tools = (result as Record<string, unknown>)["tools"];
+  if (!Array.isArray(tools)) return null;
+  return tools.filter(
+    (t): t is Tool =>
+      t !== null && typeof t === "object" && typeof (t as Tool).name === "string"
+  );
+}
 
 function extractMethod(msg: InterceptedMessage): string {
   return "method" in msg.parsed ? (msg.parsed.method as string) : "(response)";
@@ -64,7 +94,7 @@ function buildSyntheticError(
     "id" in msg.parsed
       ? (msg.parsed.id as string | number)
       : 0;
-  const ruleLabel = decision.matchedRule ?? "policy";
+  const ruleLabel = decision.matchedRule?.name ?? "policy";
   const errorMsg = `Blocked by Portcullis policy: ${ruleLabel}`;
   return JSON.stringify({
     jsonrpc: "2.0",
@@ -86,8 +116,8 @@ function buildKillSwitchError(msg: InterceptedMessage): string {
 }
 
 async function promptConfirm(decision: PolicyDecision): Promise<boolean> {
-  const rule = decision.matchedRule ?? "unknown rule";
-  const detail = decision.message?.trim() ?? "";
+  const rule = decision.matchedRule?.name ?? "unknown rule";
+  const detail = decision.matchedRule?.message?.trim() ?? "";
   process.stderr.write(
     `\n[portcullis] CONFIRM REQUIRED\nRule: "${rule}"\n${detail ? detail + "\n" : ""}Allow? [y/N]: `
   );
@@ -126,6 +156,43 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     `[portcullis] ${msg.timestamp} ${msg.direction} ${JSON.stringify(msg.parsed).slice(0, 120)}\n`
   );
 
+  // Scan tools/list advertisements server→client. Repopulate the cache and emit
+  // an alert (JSONL-first, then stderr) for every warn/critical finding.
+  const toolsList = extractToolsList(msg);
+  if (toolsList !== null) {
+    const findings = scanner.scan(toolsList);
+    scanCache.clear();
+    for (const f of findings) {
+      const existing = scanCache.get(f.toolName);
+      if (existing) existing.push(f);
+      else scanCache.set(f.toolName, [f]);
+    }
+
+    for (const f of findings) {
+      if (f.severity !== "warn" && f.severity !== "critical") continue;
+      logger.append({
+        timestamp: new Date().toISOString(),
+        session_id: msg.sessionId,
+        direction: "server_to_client",
+        server: msg.server,
+        method: "tools/list",
+        message: {
+          alert: "injection_scan_alert",
+          toolName: f.toolName,
+          field: f.field,
+          pattern: f.pattern,
+          severity: f.severity,
+        },
+        type: "injection_scan_alert",
+      }).catch((err: unknown) => {
+        process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
+      });
+      process.stderr.write(
+        `[portcullis] [INJECTION ${f.severity.toUpperCase()}] tool "${f.toolName}" ${f.field}: ${f.pattern}\n`
+      );
+    }
+  }
+
   const call = msg.direction === "client->server" ? extractToolCall(msg) : null;
   const toolCapabilities =
     call !== null ? tagTool(msg.server, call.toolName) : undefined;
@@ -156,6 +223,36 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
         process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
       });
     }
+
+    // Observe taint. Capture the pre-observe state so the session_tainted
+    // audit event fires exactly once, on the false→true transition.
+    const taintEvent: ToolCallEvent = {
+      tool: call.toolName,
+      server: msg.server,
+      capabilities: toolCapabilities ?? [],
+    };
+    const wasTainted = taintTracker.isTainted();
+    taintTracker.observe(taintEvent);
+    if (!wasTainted && taintTracker.isTainted()) {
+      process.stderr.write(
+        `[portcullis] [ALERT] Session ${msg.sessionId} tainted by ${call.toolName}\n`
+      );
+      logger.append({
+        timestamp: new Date().toISOString(),
+        session_id: msg.sessionId,
+        direction: "client_to_server",
+        server: msg.server,
+        method: "tools/call",
+        message: {
+          alert: "session_tainted",
+          triggeredBy: call.toolName,
+        },
+        type: "session_tainted",
+        ...(toolCapabilities !== undefined ? { capabilities: toolCapabilities } : {}),
+      }).catch((err: unknown) => {
+        process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
+      });
+    }
   }
 
   logger.append({
@@ -180,17 +277,30 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     return { forward: true };
   }
 
-  const ctx: ToolCallContext = {
-    toolName: call.toolName,
-    serverName: msg.server,
-    toolCapabilities: toolCapabilities ?? [],
-    sessionCapabilities: [...tracker.getCapabilities()],
-    sessionTainted: false, // populated by #21
-    trifecta: tracker.isTriggered(),
+  // Enrich with cached injection findings for this tool. Only warn+critical
+  // pattern keys reach the policy engine; 'info' findings are excluded.
+  const cached = scanCache.get(call.toolName) ?? [];
+  const descriptionFindings = [
+    ...new Set(
+      cached
+        .filter((f) => f.severity === "warn" || f.severity === "critical")
+        .map((f) => f.pattern)
+    ),
+  ];
+
+  const event: ToolCallEvent = {
+    tool: call.toolName,
+    server: msg.server,
+    capabilities: toolCapabilities ?? [],
+    sessionTrifecta: tracker.isTriggered(),
+    sessionTainted: taintTracker.isTainted(),
+    ...(descriptionFindings.length > 0 ? { descriptionFindings } : {}),
+    // Pass the call arguments through so the engine's `arguments_match`
+    // condition can scan them. extractToolCall already defaults this to {}.
     arguments: call.args,
   };
 
-  const decision = engine.evaluate(ctx);
+  const decision = engine.evaluate(event);
 
   if (decision.action === "allow") {
     return { forward: true };
@@ -198,7 +308,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
 
   if (decision.action === "warn") {
     process.stderr.write(
-      `[portcullis] WARN — rule "${decision.matchedRule ?? "unknown"}": ${decision.message?.trim() ?? ""}\n`
+      `[portcullis] WARN — rule "${decision.matchedRule?.name ?? "unknown"}": ${decision.matchedRule?.message?.trim() ?? ""}\n`
     );
     logger.append({
       timestamp: msg.timestamp,
@@ -236,7 +346,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
 
   // action === "block"
   process.stderr.write(
-    `[portcullis] BLOCKED — rule "${decision.matchedRule ?? "unknown"}": ${decision.message?.trim() ?? ""}\n`
+    `[portcullis] BLOCKED — rule "${decision.matchedRule?.name ?? "unknown"}": ${decision.matchedRule?.message?.trim() ?? ""}\n`
   );
   logger.append({
     timestamp: msg.timestamp,

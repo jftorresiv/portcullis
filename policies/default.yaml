@@ -169,6 +169,27 @@ tainting:
 # -----------------------------------------------------------------------------
 # Rules — evaluated in order, first match wins
 # -----------------------------------------------------------------------------
+# The policy engine (v0.2, issue #18) supports exactly these `when` conditions.
+# All are AND-combined; an unspecified condition is a wildcard; an absent or
+# empty `when` matches every call:
+#
+#   tool:              glob string matched against the tool name
+#   server:            glob string matched against the originating server name
+#   capabilities:      { all?: [..], any?: [..] } matched against the call's tags
+#   session_trifecta:  boolean matched against the session trifecta-complete flag
+#   session_tainted:   boolean matched against the session taint flag (set once
+#                      the session has ingested untrusted content)
+#   arguments_match:   list of regexes tested against the JSON-serialized call
+#                      arguments; fires if ANY pattern matches. The serialized
+#                      arguments are truncated to 5000 chars before matching as
+#                      a ReDoS guardrail.
+#
+# Rules relying on conditions the engine cannot yet evaluate (tool-registration
+# scanning, "new server" detection, session rate metrics) are commented out
+# below with a TODO referencing the issue that
+# will land the supporting condition. They are intentionally NOT silently
+# dropped: a disabled rule you can see beats a rule that looks active but does
+# nothing.
 rules:
 
   # -------------------------------------------------------------------------
@@ -177,8 +198,7 @@ rules:
   - name: "Lethal trifecta — block"
     description: "Session has all three legs. Block by default."
     when:
-      session_has_capabilities:
-        all: [reads_private_data, sees_untrusted_content, can_exfiltrate]
+      session_trifecta: true
     action: block
     message: |
       Lethal trifecta detected. This session can read private data,
@@ -187,98 +207,122 @@ rules:
       combination is structurally vulnerable to prompt injection.
       To proceed, start a new session without one of these capabilities.
 
+  # 2. Tool description injection scanner (issue #22) — block
   # -------------------------------------------------------------------------
-  # 2. Tainted session + exfiltration capability = require confirmation
+  # `description_matches` fires when the injection scanner flagged the called
+  # tool's advertised name/description/inputSchema with any of the listed
+  # pattern keys. Critical patterns block; nested-instruction syntax warns.
+  - name: "Critical injection pattern detected"
+    when:
+      description_matches: ['jailbreak_phrase', 'hidden_unicode']
+    action: block
+    message: "Tool description contains a known prompt injection pattern."
+
   # -------------------------------------------------------------------------
-  - name: "Tainted exfiltration"
+  # 3. Suspicious tool description — warn
+  # -------------------------------------------------------------------------
+  - name: "Suspicious instruction pattern in tool description"
+    when:
+      description_matches: ['nested_instruction']
+    action: warn
+    message: "Tool description contains nested instruction syntax."
+
+  # -------------------------------------------------------------------------
+  # 4. Tainted session attempting exfiltration — warn
+  # -------------------------------------------------------------------------
+  - name: "Taint + exfiltration risk"
+    description: >
+      Session has ingested untrusted content and is now attempting an action
+      that can transmit data outward. Warn so the user can review.
     when:
       session_tainted: true
-      tool_call:
-        has_capability: can_exfiltrate
-    action: confirm
-    message: "This session has ingested untrusted content. Confirm before exfiltrating."
-
-  # -------------------------------------------------------------------------
-  # 3. Credential-looking arguments
-  # -------------------------------------------------------------------------
-  - name: "Credential exfiltration patterns"
-    when:
-      tool_call:
-        arguments_match:
-          - 'sk-[a-zA-Z0-9]{32,}'                          # OpenAI / Anthropic style
-          - 'AKIA[0-9A-Z]{16}'                             # AWS access key
-          - 'AIza[0-9A-Za-z\-_]{35}'                       # Google API key
-          - 'ghp_[a-zA-Z0-9]{36}'                          # GitHub PAT
-          - 'xox[baprs]-[0-9a-zA-Z\-]+'                    # Slack token
-          - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'   # Private keys
-          - '(?i)(api[_-]?key|password|token|secret)\s*[:=]\s*[^\s,;}]+\S'
-    action: block
-    message: "Tool call arguments contain what looks like a credential."
-
-  # -------------------------------------------------------------------------
-  # 4. Tool description injection scanner (runs at registration time)
-  # -------------------------------------------------------------------------
-  - name: "Injection patterns in tool descriptions"
-    when:
-      tool_registration:
-        description_matches:
-          - '(?i)forget (?:everything|all|your)'
-          - '(?i)ignore (?:all )?previous (?:instructions|prompts)'
-          - '<important>.{0,500}</important>'
-          - '(?i)this code is (?:safe|legit|tested|verified)'
-          - '\u200b|\u200c|\u200d|\ufeff'                  # zero-width characters
-          - '(?i)system\s*:\s*you (?:are|should|must)'
-    action: block
-    message: "Tool description contains prompt injection patterns. Refusing to register."
-
-  # -------------------------------------------------------------------------
-  # 5. Suspicious URL patterns in fetch arguments
-  # -------------------------------------------------------------------------
-  - name: "Suspicious fetch targets"
-    when:
-      tool_call:
-        tool_matches: ["fetch.*", "http.*"]
-        arguments_match:
-          - '(?i)(?:webhook|hook|collect|telemetry|analytics|beacon)\.'
-          - 'https?://\d+\.\d+\.\d+\.\d+'                  # raw IPs
-          - 'https?://[^/]*\.(tk|ml|ga|cf|gq)/'             # cheap TLDs
-    action: confirm
-    message: "Fetch target looks unusual. Confirm intent."
-
-  # -------------------------------------------------------------------------
-  # 6. First-time server registration
-  # -------------------------------------------------------------------------
-  - name: "New MCP server confirmation"
-    when:
-      server: new
-    action: confirm
+      capabilities:
+        any: [can_exfiltrate]
+    action: warn
     message: |
-      First time using this MCP server. Review its tools and capabilities
-      before allowing. Check for: bundled reverse shells, suspicious post-
-      install scripts, and tool descriptions with hidden instructions.
+      This session has ingested untrusted content and is now attempting to
+      exfiltrate. Prompt injection in that content could be driving this
+      call. Review the destination and payload before allowing.
 
   # -------------------------------------------------------------------------
-  # 7. Code execution always requires confirmation
+  # 5. Code execution always requires confirmation
   # -------------------------------------------------------------------------
   - name: "Code execution confirmation"
     when:
-      tool_call:
-        has_capability: can_execute_code
+      capabilities:
+        any: [can_execute_code]
     action: confirm
-    message: "About to execute code via {tool_name}. Confirm command."
+    message: "About to execute code. Confirm command."
 
   # -------------------------------------------------------------------------
-  # 8. Bulk data access pattern (potential exfiltration prep)
+  # DISABLED — pending future issues
   # -------------------------------------------------------------------------
-  - name: "Bulk read detection"
+  # The rules below require `when` conditions the v0.2 engine does not yet
+  # support. Re-enable each once its supporting condition lands.
+
+  - name: "Credential exfiltration patterns"
     when:
-      session_metrics:
-        tool_calls_with_capability:
-          capability: reads_private_data
-          count_in_window: 20
-          window_seconds: 60
+      arguments_match:
+        - 'sk-[a-zA-Z0-9]{32,}'                          # OpenAI / Anthropic style
+        - 'AKIA[0-9A-Z]{16}'                             # AWS access key
+        - 'AIza[0-9A-Za-z\-_]{35}'                       # Google API key
+        - 'ghp_[a-zA-Z0-9]{36}'                          # GitHub PAT
+        - 'xox[baprs]-[0-9a-zA-Z\-]+'                    # Slack token
+        - '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'   # Private keys
+        # Matching is case-insensitive (engine compiles with the `i` flag), so
+        # no inline (?i) flag — JS RegExp rejects that group syntax.
+        - '(api[_-]?key|password|token|secret)\s*[:=]\s*[^\s,;}]+\S'
+    action: block
+    message: "Tool call arguments contain what looks like a credential."
+
+  # TODO(#28): needs tool-registration description scanning.
+  # - name: "Injection patterns in tool descriptions"
+  #   when:
+  #     description_matches:
+  #       - '(?i)forget (?:everything|all|your)'
+  #       - '(?i)ignore (?:all )?previous (?:instructions|prompts)'
+  #       - '<important>.{0,500}</important>'
+  #       - '(?i)this code is (?:safe|legit|tested|verified)'
+  #       - "\u200b|\u200c|\u200d|\ufeff"             # zero-width characters
+  #       - '(?i)system\s*:\s*you (?:are|should|must)'
+  #   action: block
+  #   message: "Tool description contains prompt injection patterns. Refusing to register."
+
+  - name: "Suspicious fetch targets"
+    when:
+      # Targets the whole `fetch` server. The original stub's `tool: "fetch.*"`
+      # was the {server}.{tool} tagging-glob convention; the engine's `tool`
+      # condition matches the tool name alone, so `server` is the right key.
+      server: "fetch"
+      arguments_match:
+        # Case-insensitive via the engine's `i` flag; no inline (?i) group.
+        - '(?:webhook|hook|collect|telemetry|analytics|beacon)\.'
+        - 'https?://\d+\.\d+\.\d+\.\d+'                  # raw IPs
+        - 'https?://[^/]*\.(tk|ml|ga|cf|gq)/'             # cheap TLDs
     action: confirm
-    message: "Agent is reading private data unusually fast. Confirm continued access."
+    message: "Fetch target looks unusual. Confirm intent."
+
+  # TODO(#28): needs first-seen server detection (`server: new`
+  # as a state, not a glob).
+  # - name: "New MCP server confirmation"
+  #   when:
+  #     server_is_new: true
+  #   action: confirm
+  #   message: |
+  #     First time using this MCP server. Review its tools and capabilities
+  #     before allowing. Check for: bundled reverse shells, suspicious post-
+  #     install scripts, and tool descriptions with hidden instructions.
+
+  # TODO(#28): needs windowed session rate metrics.
+  # - name: "Bulk read detection"
+  #   when:
+  #     session_metrics:
+  #       tool_calls_with_capability:
+  #         capability: reads_private_data
+  #         count_in_window: 20
+  #         window_seconds: 60
+  #   action: confirm
+  #   message: "Agent is reading private data unusually fast. Confirm continued access."
 
 
 # -----------------------------------------------------------------------------

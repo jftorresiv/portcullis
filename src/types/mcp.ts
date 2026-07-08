@@ -39,3 +39,42 @@ export interface InterceptedMessage {
   sessionId: string;
   server: string;
 }
+
+// A tool as advertised in an MCP `tools/list` response. Only the fields the
+// injection scanner (issue #22) reads are typed here; servers may send more.
+export interface Tool {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
+// A single tool invocation, enriched with the capability tags resolved by the
+// v0.1 capability tagger, presented to the policy engine for evaluation.
+// This is the engine's input contract (see src/policy/engine.ts).
+export interface ToolCallEvent {
+  // Tool name as advertised by the server, e.g. "send_message".
+  tool: string;
+  // Originating MCP server name, e.g. "gmail".
+  server: string;
+  // Call-level capability tags from the tagger, e.g. ["can_exfiltrate"].
+  capabilities: string[];
+  // Whether the session has completed the lethal trifecta. Rides on the event
+  // so the pure engine never has to reach for session state. Defaults to false
+  // until the trifecta tracker (a later issue) populates it.
+  sessionTrifecta?: boolean;
+  // Whether the session is tainted — untrusted content has entered it. Rides
+  // on the event for the same reason as sessionTrifecta: the pure engine never
+  // reaches for session state. Populated by the taint tracker; defaults to
+  // false in evaluation.
+  sessionTainted?: boolean;
+  // Pattern keys (warn+critical only) from the injection scanner's cached scan
+  // of the tools/list response, for the tool being called. Populated by the
+  // proxy at tool-call time (issue #22). Absent when no findings apply.
+  descriptionFindings?: string[];
+  // The raw arguments object of the tool call (MCP `params.arguments`), passed
+  // through untyped from the wire. Consumed by the engine's `arguments_match`
+  // condition, which JSON-serializes it and tests configured regexes against
+  // the result. Optional: absent when the call carried no arguments, in which
+  // case the engine treats it as `{}`.
+  arguments?: unknown;
+}
