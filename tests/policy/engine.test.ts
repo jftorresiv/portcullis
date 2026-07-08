@@ -199,6 +199,37 @@ describe("PolicyEngine.evaluate", () => {
   });
 });
 
+describe("PolicyEngine server_is_new", () => {
+  const newServerRule =
+    `rules:\n` +
+    `  - name: confirm-new-server\n` +
+    `    when:\n` +
+    `      server_is_new: true\n` +
+    `    action: confirm\n`;
+
+  it("fires when serverIsNew is true", () => {
+    const engine = engineFrom(newServerRule);
+    const decision = engine.evaluate(event({ serverIsNew: true }));
+    assert.equal(decision.action, "confirm");
+    assert.equal(decision.matchedRule?.name, "confirm-new-server");
+  });
+
+  it("does not fire when serverIsNew is false", () => {
+    const engine = engineFrom(newServerRule);
+    const decision = engine.evaluate(event({ serverIsNew: false }));
+    assert.equal(decision.action, "allow");
+    assert.equal(decision.matchedRule, undefined);
+  });
+
+  it("does not fire when serverIsNew is absent (treated as false)", () => {
+    const engine = engineFrom(newServerRule);
+    // event() sets no `serverIsNew`; the engine defaults it to false.
+    const decision = engine.evaluate(event());
+    assert.equal(decision.action, "allow");
+    assert.equal(decision.matchedRule, undefined);
+  });
+});
+
 describe("PolicyEngine arguments_match", () => {
   // A rule that blocks whenever the serialized arguments contain "sk-<hex>".
   const secretRule =
