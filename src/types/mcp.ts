@@ -94,4 +94,8 @@ export interface ToolCallEvent {
   // (the proxy appends it only after evaluation). Absent or empty means the
   // metric condition cannot fire.
   sessionCallHistory?: SessionCallRecord[];
+  // Whether this is the first time the originating server has been seen. Set by
+  // the proxy from the ServerRegistry: reflects whether the server was new at
+  // tools/list time this session (issue #28). Defaults to false in evaluation.
+  serverIsNew?: boolean;
 }

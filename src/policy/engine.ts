@@ -40,6 +40,9 @@ const WhenSchema = z
     capabilities: CapabilityConditionSchema.optional(),
     session_trifecta: z.boolean().optional(),
     session_tainted: z.boolean().optional(),
+    // Matched against the event's serverIsNew flag — true the first time a
+    // server is ever seen (issue #28). Absent flag is treated as false.
+    server_is_new: z.boolean().optional(),
     // Fires if the call's descriptionFindings (injection-scanner pattern keys)
     // include any listed string. Exact match against pattern keys, not a glob.
     description_matches: z.array(z.string().min(1)).min(1).optional(),
@@ -230,6 +233,13 @@ function matches(
   if (
     when.session_tainted !== undefined &&
     when.session_tainted !== (event.sessionTainted ?? false)
+  ) {
+    return false;
+  }
+
+  if (
+    when.server_is_new !== undefined &&
+    when.server_is_new !== (event.serverIsNew ?? false)
   ) {
     return false;
   }
