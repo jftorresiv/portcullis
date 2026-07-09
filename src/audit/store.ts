@@ -12,6 +12,7 @@ export interface QueryFilters {
   to?: string;
   server?: string;
   method?: string;
+  type?: string;
 }
 
 interface Row {
@@ -23,6 +24,8 @@ interface Row {
   method: string;
   message_json: string;
   decision: string | null;
+  type: string | null;
+  capabilities_json: string | null;
 }
 
 type InsertParams = {
@@ -33,6 +36,8 @@ type InsertParams = {
   method: string;
   message_json: string;
   decision: string | null;
+  type: string | null;
+  capabilities_json: string | null;
 };
 
 function resolvePath(p: string): string {
@@ -51,6 +56,12 @@ function rowToEvent(row: Row): AuditEvent {
   };
   if (row.decision != null) {
     event.decision = row.decision as AuditEvent["decision"];
+  }
+  if (row.type != null) {
+    event.type = row.type;
+  }
+  if (row.capabilities_json != null) {
+    event.capabilities = JSON.parse(row.capabilities_json) as string[];
   }
   return event;
 }
@@ -83,16 +94,34 @@ export class Store {
         server     TEXT NOT NULL,
         method     TEXT NOT NULL,
         message_json TEXT NOT NULL,
-        decision   TEXT
+        decision   TEXT,
+        type       TEXT,
+        capabilities_json TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_session       ON events(session_id);
       CREATE INDEX IF NOT EXISTS idx_timestamp     ON events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_server_method ON events(server, method);
     `);
 
+    // Columns added after the initial release. Existing on-disk DBs won't
+    // have these yet — ALTER TABLE ADD COLUMN is a no-op-safe upgrade path
+    // that avoids forcing anyone to delete their DB file.
+    const existingColumns = new Set(
+      (this.db.pragma("table_info(events)") as Array<{ name: string }>).map(
+        (c) => c.name
+      )
+    );
+    if (!existingColumns.has("type")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN type TEXT");
+    }
+    if (!existingColumns.has("capabilities_json")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN capabilities_json TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_type ON events(type);");
+
     this.insertStmt = this.db.prepare<InsertParams>(
-      "INSERT INTO events (timestamp, session_id, direction, server, method, message_json, decision) " +
-        "VALUES (@timestamp, @session_id, @direction, @server, @method, @message_json, @decision)"
+      "INSERT INTO events (timestamp, session_id, direction, server, method, message_json, decision, type, capabilities_json) " +
+        "VALUES (@timestamp, @session_id, @direction, @server, @method, @message_json, @decision, @type, @capabilities_json)"
     );
 
     this.truncateStmt = this.db.prepare<[]>("DELETE FROM events");
@@ -107,6 +136,11 @@ export class Store {
       method: event.method,
       message_json: JSON.stringify(event.message),
       decision: event.decision ?? null,
+      type: event.type ?? null,
+      capabilities_json:
+        event.capabilities !== undefined
+          ? JSON.stringify(event.capabilities)
+          : null,
     });
   }
 
@@ -133,6 +167,10 @@ export class Store {
     if (filters.method !== undefined) {
       conditions.push("method = @method");
       params["method"] = filters.method;
+    }
+    if (filters.type !== undefined) {
+      conditions.push("type = @type");
+      params["type"] = filters.type;
     }
 
     const where =

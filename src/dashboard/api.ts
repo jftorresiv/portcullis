@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { readAuditLog } from "../audit/reader.js";
+import type { Store } from "../audit/store.js";
 import { dashboardHtml } from "./ui/index.js";
 
 const START_TIME = Date.now();
@@ -10,7 +10,7 @@ interface EventsQuery {
   limit?: string;
 }
 
-export function registerRoutes(app: FastifyInstance, logPath: string): void {
+export function registerRoutes(app: FastifyInstance, store: Store): void {
   app.get("/", async (_request, reply) => {
     reply.type("text/html");
     return dashboardHtml;
@@ -23,7 +23,7 @@ export function registerRoutes(app: FastifyInstance, logPath: string): void {
   }));
 
   app.get("/api/sessions", async () => {
-    const events = await readAuditLog(logPath);
+    const events = store.query();
 
     const map = new Map<
       string,
@@ -58,11 +58,7 @@ export function registerRoutes(app: FastifyInstance, logPath: string): void {
 
   app.get<{ Querystring: EventsQuery }>("/api/events", async (request) => {
     const { session_id, limit } = request.query;
-    let events = await readAuditLog(logPath);
-
-    if (session_id !== undefined) {
-      events = events.filter((e) => e.session_id === session_id);
-    }
+    let events = store.query(session_id !== undefined ? { session_id } : {});
 
     if (limit !== undefined) {
       const n = parseInt(limit, 10);

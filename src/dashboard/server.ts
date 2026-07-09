@@ -1,9 +1,10 @@
 import Fastify from "fastify";
 import { registerRoutes } from "./api.js";
+import { Store } from "../audit/store.js";
 
 export interface DashboardOptions {
   port?: number;
-  logPath: string;
+  dbPath: string;
   token?: string;
 }
 
@@ -13,9 +14,10 @@ const HOST = "127.0.0.1";
 const DEFAULT_PORT = 7778;
 
 export async function startDashboard(options: DashboardOptions): Promise<void> {
-  const { port = DEFAULT_PORT, logPath, token } = options;
+  const { port = DEFAULT_PORT, dbPath, token } = options;
 
   const app = Fastify({ logger: false });
+  const store = new Store(dbPath);
 
   if (token !== undefined) {
     app.addHook("onRequest", async (request, reply) => {
@@ -28,7 +30,7 @@ export async function startDashboard(options: DashboardOptions): Promise<void> {
     process.stderr.write(`[portcullis] dashboard token: ${token}\n`);
   }
 
-  registerRoutes(app, logPath);
+  registerRoutes(app, store);
 
   await app.listen({ port, host: HOST });
   process.stdout.write(`Portcullis dashboard running at http://${HOST}:${port}\n`);

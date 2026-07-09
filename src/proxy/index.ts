@@ -12,11 +12,11 @@ import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
 import { killSwitch } from "./kill-switch.js";
-import type { InterceptedMessage } from "../types/mcp.js";
 import { TaintTracker } from "../detection/taint.js";
 import { ServerRegistry } from "../detection/server-registry.js";
 import { InjectionScanner } from "../scanner/injection.js";
 import type { ScanResult } from "../scanner/injection.js";
+import { Store } from "../audit/store.js";
 import type {
   InterceptedMessage,
   SessionCallRecord,
@@ -25,9 +25,11 @@ import type {
 } from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
+const DB_PATH = process.env["PORTCULLIS_DB_PATH"] ?? "~/.portcullis/audit.db";
 const SERVER_NAME = "filesystem";
 
-const logger = new Logger(LOG_PATH);
+const store = new Store(DB_PATH);
+const logger = new Logger(LOG_PATH, store);
 
 const policyPath =
   process.env["PORTCULLIS_POLICY"] ??
@@ -468,5 +470,5 @@ process.on("SIGUSR2", () => {
   process.stderr.write("[portcullis] Kill switch RESET — forwarding resumed\n");
 });
 
-process.on("SIGTERM", () => { void logger.close(); });
-process.on("SIGINT", () => { void logger.close(); });
+process.on("SIGTERM", () => { void logger.close().then(() => store.close()); });
+process.on("SIGINT", () => { void logger.close().then(() => store.close()); });
