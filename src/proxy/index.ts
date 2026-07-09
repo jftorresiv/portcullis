@@ -17,7 +17,12 @@ import { TaintTracker } from "../detection/taint.js";
 import { ServerRegistry } from "../detection/server-registry.js";
 import { InjectionScanner } from "../scanner/injection.js";
 import type { ScanResult } from "../scanner/injection.js";
-import type { InterceptedMessage, Tool, ToolCallEvent } from "../types/mcp.js";
+import type {
+  InterceptedMessage,
+  SessionCallRecord,
+  Tool,
+  ToolCallEvent,
+} from "../types/mcp.js";
 
 const LOG_PATH = process.env["PORTCULLIS_AUDIT_LOG"] ?? "~/.portcullis/audit.jsonl";
 const SERVER_NAME = "filesystem";
@@ -62,6 +67,25 @@ const sessionNewServers = new Set<string>();
 // retain stale findings. Looked up at tool-call time to enrich the policy event.
 const scanner = new InjectionScanner();
 const scanCache = new Map<string, ScanResult[]>();
+
+// Per-session rolling tool-call history, feeding the policy engine's
+// `session_metrics` condition (issue #28). Keyed by sessionId. Records older
+// than this window are pruned on every append so memory stays bounded — the
+// window also caps how far any `window_seconds` metric can look back.
+const SESSION_HISTORY_WINDOW_MS = 300_000; // 300 seconds
+const sessionHistory = new Map<string, SessionCallRecord[]>();
+
+// Appends one call to a session's history and prunes anything older than the
+// rolling window. Called AFTER the engine has evaluated the current call, so
+// the current call never counts toward its own window.
+function recordSessionCall(sessionId: string, capabilities: string[]): void {
+  const now = Date.now();
+  const cutoff = now - SESSION_HISTORY_WINDOW_MS;
+  const prior = sessionHistory.get(sessionId) ?? [];
+  const next = prior.filter((rec) => rec.timestamp >= cutoff);
+  next.push({ timestamp: now, capabilities });
+  sessionHistory.set(sessionId, next);
+}
 
 // Extracts the tools array from a server→client tools/list response. Responses
 // carry no `method`, so detection is structural: parsed.result.tools is an
@@ -309,7 +333,16 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
   }
 
   // Only enforce on client→server tools/call messages.
-  if (call === null || engine === null) {
+  if (call === null) {
+    return { forward: true };
+  }
+
+  // Every tool call is recorded in the session's rolling history regardless of
+  // the enforcement outcome. When there is no engine, record here and return.
+  // With an engine, recording is deferred to just after evaluate() below so the
+  // current call never counts toward its own window.
+  if (engine === null) {
+    recordSessionCall(msg.sessionId, toolCapabilities ?? []);
     return { forward: true };
   }
 
@@ -324,6 +357,11 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     ),
   ];
 
+  // Prior-only history for this session: the current call is appended after
+  // evaluate() (see recordSessionCall), so it never counts toward its own
+  // window. Empty array when the session has no history yet.
+  const priorHistory = sessionHistory.get(msg.sessionId) ?? [];
+
   const event: ToolCallEvent = {
     tool: call.toolName,
     server: msg.server,
@@ -334,6 +372,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     // Pass the call arguments through so the engine's `arguments_match`
     // condition can scan them. extractToolCall already defaults this to {}.
     arguments: call.args,
+    sessionCallHistory: priorHistory,
     // True if this server was seen for the first time at tools/list time this
     // session (issue #28). By tool-call time it is already marked seen, so the
     // per-session set is the source of truth, not registry.isNew().
@@ -341,6 +380,10 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
   };
 
   const decision = engine.evaluate(event);
+
+  // Record this call now that evaluation is done — every decision path below
+  // (allow/warn/confirm/block) has already consumed the prior-only history.
+  recordSessionCall(msg.sessionId, toolCapabilities ?? []);
 
   if (decision.action === "allow") {
     return { forward: true };
