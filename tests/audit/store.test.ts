@@ -51,6 +51,30 @@ describe("Store", () => {
       store.close();
     });
 
+    it("round-trips an event with a type and capabilities", () => {
+      const store = new Store(":memory:");
+      const event = makeEvent({
+        type: "trifecta_alert",
+        capabilities: ["reads_private_data", "can_exfiltrate"],
+      });
+      store.insert(event);
+      const [row] = store.query();
+      assert.ok(row !== undefined);
+      assert.equal(row.type, "trifecta_alert");
+      assert.deepEqual(row.capabilities, ["reads_private_data", "can_exfiltrate"]);
+      store.close();
+    });
+
+    it("leaves type and capabilities undefined when not provided", () => {
+      const store = new Store(":memory:");
+      store.insert(makeEvent());
+      const [row] = store.query();
+      assert.ok(row !== undefined);
+      assert.equal(row.type, undefined);
+      assert.equal(row.capabilities, undefined);
+      store.close();
+    });
+
     it("preserves insertion order across multiple events", () => {
       const store = new Store(":memory:");
       const methods = ["tools/list", "tools/call", "resources/read"] as const;
@@ -96,6 +120,7 @@ describe("Store", () => {
               method: i % 3 === 0 ? "tools/call" : "tools/list",
               timestamp: new Date(base.getTime() + i * 60_000).toISOString(),
               decision: i % 4 === 0 ? "allowed" : undefined,
+              type: i % 5 === 0 ? "trifecta_alert" : undefined,
             })
           );
         }
@@ -152,6 +177,12 @@ describe("Store", () => {
       const rows = store.query({ method: "tools/call" });
       assert.ok(rows.length > 0);
       assert.ok(rows.every((r) => r.method === "tools/call"));
+    });
+
+    it("filters by type", () => {
+      const rows = store.query({ type: "trifecta_alert" });
+      assert.equal(rows.length, 2);
+      assert.ok(rows.every((r) => r.type === "trifecta_alert"));
     });
 
     it("filters by server + method combined", () => {
