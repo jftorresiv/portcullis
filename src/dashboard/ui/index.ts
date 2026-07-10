@@ -13,11 +13,41 @@ export const dashboardHtml = `<!DOCTYPE html>
     h2 { font-size: 0.8rem; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
     .badge { display: inline-flex; align-items: center; gap: 0.4rem; background: #0d1117; border: 1px solid #21262d; border-radius: 2rem; padding: 0.25rem 0.75rem; font-size: 0.8rem; font-family: monospace; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; display: inline-block; }
+    .dot.red { background: #f85149; }
     .session { padding: 0.625rem; border-radius: 4px; margin-bottom: 0.5rem; border: 1px solid #21262d; font-size: 0.85rem; }
     .session:last-child { margin-bottom: 0; }
     .session-id { font-family: monospace; font-weight: 600; }
     .session-meta { color: #6e7681; font-size: 0.75rem; margin-top: 0.25rem; }
+    .session-flags { display: inline-flex; gap: 0.375rem; margin-left: 0.5rem; }
+    .flag-tag {
+      font-size: 0.65rem; font-family: monospace; padding: 0.1rem 0.4rem;
+      border-radius: 3px; border: 1px solid; text-transform: uppercase;
+    }
+    .flag-trifecta { color: #f85149; border-color: #f8514940; }
+    .flag-tainted { color: #d29922; border-color: #d2992240; }
     .empty { color: #6e7681; font-size: 0.85rem; font-style: italic; }
+
+    .alert-row {
+      padding: 0.5rem 0.625rem; border-radius: 4px; margin-bottom: 0.375rem;
+      border: 1px solid #21262d; font-size: 0.8rem;
+    }
+    .alert-row:last-child { margin-bottom: 0; }
+    .alert-tool { font-family: monospace; font-weight: 600; }
+    .alert-meta { color: #6e7681; font-size: 0.75rem; margin-top: 0.2rem; }
+    .alert-severity {
+      font-size: 0.65rem; font-family: monospace; padding: 0.1rem 0.4rem;
+      border-radius: 3px; border: 1px solid; text-transform: uppercase; margin-left: 0.4rem;
+    }
+
+    .ks-row { display: flex; align-items: center; gap: 1rem; }
+    .ks-status { font-size: 0.85rem; }
+    .ks-button {
+      background: #21262d; color: #c9d1d9; border: 1px solid #f85149;
+      border-radius: 4px; padding: 0.4rem 0.9rem; font-size: 0.8rem;
+      font-weight: 600; cursor: pointer;
+    }
+    .ks-button:hover { background: #f8514920; }
+    .ks-button:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .tl-filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
     .tl-filters input, .tl-filters select {
@@ -71,8 +101,21 @@ export const dashboardHtml = `<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>Kill Switch</h2>
+    <div class="ks-row">
+      <span id="ks-status" class="ks-status"><span class="empty">Loading&#8230;</span></span>
+      <button id="ks-button" class="ks-button">Activate kill switch</button>
+    </div>
+  </section>
+
+  <section>
     <h2>Sessions</h2>
     <div id="sessions"><span class="empty">Loading&#8230;</span></div>
+  </section>
+
+  <section>
+    <h2>Injection Alerts</h2>
+    <div id="injection-alerts"><span class="empty">Loading&#8230;</span></div>
   </section>
 
   <section>
@@ -110,9 +153,17 @@ export const dashboardHtml = `<!DOCTYPE html>
           el.innerHTML = '<span class="empty">No sessions yet. Start a proxy to see activity here.</span>';
         } else {
           el.innerHTML = sessions.map(function(s) {
+            var flags = '';
+            if (s.trifecta || s.tainted) {
+              flags = '<span class="session-flags">' +
+                (s.trifecta ? '<span class="flag-tag flag-trifecta">trifecta</span>' : '') +
+                (s.tainted ? '<span class="flag-tag flag-tainted">tainted</span>' : '') +
+                '</span>';
+            }
             return '<div class="session">' +
+              '<span class="dot' + (s.trifecta ? ' red' : '') + '"></span>&nbsp;' +
               '<span class="session-id">' + s.session_id.slice(0, 8) + '&#8230;</span>' +
-              '&nbsp;&nbsp;' + s.servers.join(', ') +
+              '&nbsp;&nbsp;' + s.servers.join(', ') + flags +
               '<div class="session-meta">' + s.event_count + ' event' + (s.event_count !== 1 ? 's' : '') +
               ' \xb7 last active ' + new Date(s.last_seen).toLocaleString() + '</div>' +
               '</div>';
@@ -124,7 +175,70 @@ export const dashboardHtml = `<!DOCTYPE html>
     }
 
     load();
-    setInterval(load, 10000);
+    setInterval(load, 1000);
+
+    // ---- injection alerts ----
+    async function loadInjectionAlerts() {
+      try {
+        var events = await (await fetch('/api/events?type=injection_scan_alert&limit=25')).json();
+        var el = document.getElementById('injection-alerts');
+        if (!events.length) {
+          el.innerHTML = '<span class="empty">No injection alerts.</span>';
+          return;
+        }
+        events.sort(function(a, b) { return a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0; });
+        el.innerHTML = events.map(function(e) {
+          var m = e.message || {};
+          var sev = m.severity || 'warn';
+          var sevColor = sev === 'critical' ? '#f85149' : '#d29922';
+          return '<div class="alert-row">' +
+            '<span class="alert-tool">' + escHtml(m.toolName || '') + '</span>' +
+            '<span class="alert-severity" style="color:' + sevColor + ';border-color:' + sevColor + '40">' + escHtml(sev) + '</span>' +
+            '<div class="alert-meta">' + escHtml(m.field || '') + ': ' + escHtml(m.pattern || '') +
+            ' \xb7 ' + new Date(e.timestamp).toLocaleString() + '</div>' +
+            '</div>';
+        }).join('');
+      } catch (e) {
+        document.getElementById('injection-alerts').innerHTML = '<span class="empty">Failed to load injection alerts.</span>';
+      }
+    }
+
+    loadInjectionAlerts();
+    setInterval(loadInjectionAlerts, 1000);
+
+    // ---- kill switch ----
+    var ksBusy = false;
+
+    async function loadKillSwitchStatus() {
+      try {
+        var s = await (await fetch('/api/kill-switch/status')).json();
+        var el = document.getElementById('ks-status');
+        el.innerHTML = s.frozen
+          ? '<span class="dot red"></span>&nbsp;FROZEN'
+          : '<span class="dot"></span>&nbsp;running';
+        document.getElementById('ks-button').disabled = ksBusy || !!s.frozen;
+      } catch (e) {
+        document.getElementById('ks-status').innerHTML = '<span class="empty">Could not reach API</span>';
+      }
+    }
+
+    document.getElementById('ks-button').addEventListener('click', async function() {
+      if (ksBusy) return;
+      if (!confirm('Activate the kill switch? This immediately freezes all forwarding to the MCP server.')) return;
+      ksBusy = true;
+      document.getElementById('ks-button').disabled = true;
+      try {
+        await fetch('/api/kill-switch/activate', { method: 'POST' });
+      } catch (e) {
+        // status poll will reflect whatever the actual state is
+      } finally {
+        ksBusy = false;
+        loadKillSwitchStatus();
+      }
+    });
+
+    loadKillSwitchStatus();
+    setInterval(loadKillSwitchStatus, 1000);
 
     // ---- timeline ----
     var tlState = {
@@ -212,7 +326,10 @@ export const dashboardHtml = `<!DOCTYPE html>
             return '<span class="cap-tag">' + escHtml(c) + '</span>';
           }).join('') + '</div>';
         }
-        detail.innerHTML = capHtml + '<pre class="tl-payload">' + escHtml(JSON.stringify(e.message, null, 2)) + '</pre>';
+        var ruleHtml = e.matchedRule
+          ? '<div class="tl-caps"><span class="cap-tag">rule: ' + escHtml(e.matchedRule) + '</span></div>'
+          : '';
+        detail.innerHTML = capHtml + ruleHtml + '<pre class="tl-payload">' + escHtml(JSON.stringify(e.message, null, 2)) + '</pre>';
 
         row.appendChild(header);
         row.appendChild(detail);
