@@ -2,6 +2,10 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import Database from "better-sqlite3";
 import { Store } from "../../src/audit/store.js";
 import type { AuditEvent } from "../../src/audit/logger.js";
 
@@ -72,6 +76,25 @@ describe("Store", () => {
       assert.ok(row !== undefined);
       assert.equal(row.type, undefined);
       assert.equal(row.capabilities, undefined);
+      store.close();
+    });
+
+    it("round-trips an event with a matchedRule", () => {
+      const store = new Store(":memory:");
+      const event = makeEvent({ decision: "blocked", matchedRule: "block-secrets-exfil" });
+      store.insert(event);
+      const [row] = store.query();
+      assert.ok(row !== undefined);
+      assert.equal(row.matchedRule, "block-secrets-exfil");
+      store.close();
+    });
+
+    it("leaves matchedRule undefined when not provided", () => {
+      const store = new Store(":memory:");
+      store.insert(makeEvent());
+      const [row] = store.query();
+      assert.ok(row !== undefined);
+      assert.equal(row.matchedRule, undefined);
       store.close();
     });
 
@@ -219,6 +242,65 @@ describe("Store", () => {
       const a = store.query({ server: "server-alpha" });
       const b = store.query({ server: "server-alpha" });
       assert.deepEqual(a, b);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ALTER TABLE upgrade path — opening an on-disk DB created before
+  // type/capabilities_json/matched_rule existed must not fail or lose data.
+  // ---------------------------------------------------------------------------
+
+  describe("schema upgrade path", () => {
+    it("adds missing columns to a pre-existing on-disk DB without losing data", () => {
+      const dbPath = path.join(os.tmpdir(), `portcullis-upgrade-test-${randomUUID()}.db`);
+
+      // Build a DB with the original (pre-#34) schema — no type,
+      // capabilities_json, or matched_rule columns — and seed one row.
+      const legacy = new Database(dbPath);
+      legacy.exec(`
+        CREATE TABLE events (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp  TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          direction  TEXT NOT NULL,
+          server     TEXT NOT NULL,
+          method     TEXT NOT NULL,
+          message_json TEXT NOT NULL,
+          decision   TEXT
+        );
+      `);
+      const seeded = makeEvent({ decision: "allowed" });
+      legacy
+        .prepare(
+          "INSERT INTO events (timestamp, session_id, direction, server, method, message_json, decision) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(
+          seeded.timestamp,
+          seeded.session_id,
+          seeded.direction,
+          seeded.server,
+          seeded.method,
+          JSON.stringify(seeded.message),
+          seeded.decision ?? null
+        );
+      legacy.close();
+
+      // Opening via Store must run the ALTER TABLE upgrade path, not throw.
+      const store = new Store(dbPath);
+      const rows = store.query();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.session_id, seeded.session_id);
+      assert.equal(rows[0]?.type, undefined);
+      assert.equal(rows[0]?.matchedRule, undefined);
+
+      // New inserts on the upgraded DB use the new columns fine.
+      store.insert(makeEvent({ type: "trifecta_alert", matchedRule: "some-rule" }));
+      const rows2 = store.query({ type: "trifecta_alert" });
+      assert.equal(rows2.length, 1);
+      assert.equal(rows2[0]?.matchedRule, "some-rule");
+
+      store.close();
+      fs.rmSync(dbPath, { force: true });
     });
   });
 

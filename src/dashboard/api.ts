@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Store } from "../audit/store.js";
 import { dashboardHtml } from "./ui/index.js";
+import { resolvePidPath, readPidFile } from "../proxy/pidfile.js";
 
 const START_TIME = Date.now();
 const VERSION = "0.1.0";
@@ -8,9 +9,22 @@ const VERSION = "0.1.0";
 interface EventsQuery {
   session_id?: string;
   limit?: string;
+  type?: string;
 }
 
-export function registerRoutes(app: FastifyInstance, store: Store): void {
+export interface RouteOptions {
+  pidPath?: string;
+  killFn?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+export function registerRoutes(
+  app: FastifyInstance,
+  store: Store,
+  opts: RouteOptions = {}
+): void {
+  const pidPath = opts.pidPath ?? resolvePidPath();
+  const killFn = opts.killFn ?? ((pid, signal) => process.kill(pid, signal));
+
   app.get("/", async (_request, reply) => {
     reply.type("text/html");
     return dashboardHtml;
@@ -27,7 +41,14 @@ export function registerRoutes(app: FastifyInstance, store: Store): void {
 
     const map = new Map<
       string,
-      { first_seen: string; last_seen: string; event_count: number; servers: Set<string> }
+      {
+        first_seen: string;
+        last_seen: string;
+        event_count: number;
+        servers: Set<string>;
+        trifecta: boolean;
+        tainted: boolean;
+      }
     >();
 
     for (const event of events) {
@@ -38,12 +59,16 @@ export function registerRoutes(app: FastifyInstance, store: Store): void {
           last_seen: event.timestamp,
           event_count: 1,
           servers: new Set([event.server]),
+          trifecta: event.type === "trifecta_alert",
+          tainted: event.type === "session_tainted",
         });
       } else {
         if (event.timestamp < s.first_seen) s.first_seen = event.timestamp;
         if (event.timestamp > s.last_seen) s.last_seen = event.timestamp;
         s.event_count++;
         s.servers.add(event.server);
+        if (event.type === "trifecta_alert") s.trifecta = true;
+        if (event.type === "session_tainted") s.tainted = true;
       }
     }
 
@@ -53,12 +78,19 @@ export function registerRoutes(app: FastifyInstance, store: Store): void {
       last_seen: s.last_seen,
       event_count: s.event_count,
       servers: Array.from(s.servers),
+      trifecta: s.trifecta,
+      tainted: s.tainted,
     }));
   });
 
   app.get<{ Querystring: EventsQuery }>("/api/events", async (request) => {
-    const { session_id, limit } = request.query;
-    let events = store.query(session_id !== undefined ? { session_id } : {});
+    const { session_id, limit, type } = request.query;
+
+    const filters: { session_id?: string; type?: string } = {};
+    if (session_id !== undefined) filters.session_id = session_id;
+    if (type !== undefined) filters.type = type;
+
+    let events = store.query(filters);
 
     if (limit !== undefined) {
       const n = parseInt(limit, 10);
@@ -66,5 +98,33 @@ export function registerRoutes(app: FastifyInstance, store: Store): void {
     }
 
     return events;
+  });
+
+  app.get("/api/kill-switch/status", async () => {
+    const activated = store.query({ type: "kill_switch_activated" });
+    const reset = store.query({ type: "kill_switch_reset" });
+    const lastActivated = activated.at(-1)?.timestamp;
+    const lastReset = reset.at(-1)?.timestamp;
+    const frozen =
+      lastActivated !== undefined &&
+      (lastReset === undefined || lastActivated > lastReset);
+    return { frozen };
+  });
+
+  app.post("/api/kill-switch/activate", async (_request, reply) => {
+    const pid = readPidFile(pidPath);
+    if (pid === null) {
+      await reply.code(503).send({ error: "proxy not running (no pid file found)" });
+      return;
+    }
+
+    try {
+      killFn(pid, "SIGUSR1");
+    } catch (err) {
+      await reply.code(503).send({ error: `failed to signal proxy process: ${err}` });
+      return;
+    }
+
+    return { status: "activated" };
   });
 }

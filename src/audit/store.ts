@@ -26,6 +26,7 @@ interface Row {
   decision: string | null;
   type: string | null;
   capabilities_json: string | null;
+  matched_rule: string | null;
 }
 
 type InsertParams = {
@@ -38,6 +39,7 @@ type InsertParams = {
   decision: string | null;
   type: string | null;
   capabilities_json: string | null;
+  matched_rule: string | null;
 };
 
 function resolvePath(p: string): string {
@@ -62,6 +64,9 @@ function rowToEvent(row: Row): AuditEvent {
   }
   if (row.capabilities_json != null) {
     event.capabilities = JSON.parse(row.capabilities_json) as string[];
+  }
+  if (row.matched_rule != null) {
+    event.matchedRule = row.matched_rule;
   }
   return event;
 }
@@ -96,7 +101,8 @@ export class Store {
         message_json TEXT NOT NULL,
         decision   TEXT,
         type       TEXT,
-        capabilities_json TEXT
+        capabilities_json TEXT,
+        matched_rule TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_session       ON events(session_id);
       CREATE INDEX IF NOT EXISTS idx_timestamp     ON events(timestamp);
@@ -117,11 +123,14 @@ export class Store {
     if (!existingColumns.has("capabilities_json")) {
       this.db.exec("ALTER TABLE events ADD COLUMN capabilities_json TEXT");
     }
+    if (!existingColumns.has("matched_rule")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN matched_rule TEXT");
+    }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_type ON events(type);");
 
     this.insertStmt = this.db.prepare<InsertParams>(
-      "INSERT INTO events (timestamp, session_id, direction, server, method, message_json, decision, type, capabilities_json) " +
-        "VALUES (@timestamp, @session_id, @direction, @server, @method, @message_json, @decision, @type, @capabilities_json)"
+      "INSERT INTO events (timestamp, session_id, direction, server, method, message_json, decision, type, capabilities_json, matched_rule) " +
+        "VALUES (@timestamp, @session_id, @direction, @server, @method, @message_json, @decision, @type, @capabilities_json, @matched_rule)"
     );
 
     this.truncateStmt = this.db.prepare<[]>("DELETE FROM events");
@@ -141,6 +150,7 @@ export class Store {
         event.capabilities !== undefined
           ? JSON.stringify(event.capabilities)
           : null,
+      matched_rule: event.matchedRule ?? null,
     });
   }
 

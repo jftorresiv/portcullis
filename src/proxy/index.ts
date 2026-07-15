@@ -12,6 +12,7 @@ import { CapabilityRegistry } from "../capabilities/registry.js";
 import { init as initTagger, tagTool } from "../capabilities/tagger.js";
 import { TrifectaTracker } from "../detection/trifecta.js";
 import { killSwitch } from "./kill-switch.js";
+import { resolvePidPath, writePidFile, removePidFile } from "./pidfile.js";
 import { TaintTracker } from "../detection/taint.js";
 import { ServerRegistry } from "../detection/server-registry.js";
 import { InjectionScanner } from "../scanner/injection.js";
@@ -404,6 +405,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
       message: msg.parsed as unknown as Record<string, unknown>,
       decision: "warned",
       ...(toolCapabilities !== undefined ? { capabilities: toolCapabilities } : {}),
+      ...(decision.matchedRule !== undefined ? { matchedRule: decision.matchedRule.name } : {}),
     }).catch((err: unknown) => {
       process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
     });
@@ -422,6 +424,7 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
       message: msg.parsed as unknown as Record<string, unknown>,
       decision: auditDecision,
       ...(toolCapabilities !== undefined ? { capabilities: toolCapabilities } : {}),
+      ...(decision.matchedRule !== undefined ? { matchedRule: decision.matchedRule.name } : {}),
     }).catch((err: unknown) => {
       process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
     });
@@ -442,11 +445,18 @@ async function onMessage(msg: InterceptedMessage): Promise<ForwardDecision> {
     message: msg.parsed as unknown as Record<string, unknown>,
     decision: "blocked",
     ...(toolCapabilities !== undefined ? { capabilities: toolCapabilities } : {}),
+    ...(decision.matchedRule !== undefined ? { matchedRule: decision.matchedRule.name } : {}),
   }).catch((err: unknown) => {
     process.stderr.write(`[portcullis] audit log write failed: ${err}\n`);
   });
   return { forward: false, syntheticResponse: buildSyntheticError(msg, decision) };
 }
+
+// Lets the (separate-process) dashboard find this proxy to signal the kill
+// switch — see src/proxy/pidfile.ts and the dashboard's
+// /api/kill-switch/activate route.
+const pidPath = resolvePidPath();
+writePidFile(pidPath);
 
 startProxy({
   serverCommand: [
@@ -470,5 +480,5 @@ process.on("SIGUSR2", () => {
   process.stderr.write("[portcullis] Kill switch RESET — forwarding resumed\n");
 });
 
-process.on("SIGTERM", () => { void logger.close().then(() => store.close()); });
-process.on("SIGINT", () => { void logger.close().then(() => store.close()); });
+process.on("SIGTERM", () => { removePidFile(pidPath); void logger.close().then(() => store.close()); });
+process.on("SIGINT", () => { removePidFile(pidPath); void logger.close().then(() => store.close()); });

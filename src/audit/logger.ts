@@ -14,6 +14,7 @@ export const AuditEventSchema = z.object({
   decision: z.enum(["allowed", "blocked", "warned", "confirmed"]).optional(),
   capabilities: z.array(z.string()).optional(),
   type: z.string().optional(),
+  matchedRule: z.string().min(1).optional(),
 });
 
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
